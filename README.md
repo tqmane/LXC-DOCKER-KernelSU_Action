@@ -1,6 +1,6 @@
 # OnePlus 9 Pro LXC + Docker Kernel Action
 
-このActionは、OnePlus 9 Pro向けAndroid 15 kernelを **KernelSU/SukiSUなし** でビルドし、LXC / Docker向け設定とパッチを残す構成です。
+このActionは、指定されたOnePlus 9 Pro用manifestをそのまま同期してビルドしつつ、Action側に元々あったKernelSU導入処理を削除し、LXC / Docker向け設定とパッチだけを追加する構成です。
 
 ## ビルド元
 
@@ -19,23 +19,25 @@ BUILD_KERNEL=1 \
 build/build.sh
 ```
 
+> manifestのREADMEには`build.config.msm.lemonade`とありますが、実際のOnePlus 9/9 Pro kernel treeに存在するファイルは`build.config.lemonade`です。
+
 ## KernelSU / SukiSUについて
 
-指定manifestは現在、private kernel repositoryの`oneplus/sm8350v_15.0.0_oneplus9pro_sukisu`とKernelSU submoduleを参照しています。
+このAction自身はKernelSUをcloneしたり、`setup.sh`を実行したり、KSU用configを追加したりしません。
 
-このActionではmanifestの他のproject構成はそのまま使用し、kernel projectだけを以下へlocal manifestでoverrideします。
-
-- repository: `tqmane/android_kernel_oppo_sm8350-private`
-- branch: `oneplus/sm8350v_15.0.0_oneplus9pro`
-
-同期後に`KernelSU`、`drivers/kernelsu`、KernelSU/SukiSU submoduleが存在しないことも確認し、残っている場合はビルドを停止します。
+ただし、指定manifest自体は現在private kernel branchとKernelSU/SukiSU submoduleを参照しています。そのため、**manifestに元から含まれているKernelSU/SukiSUはそのまま同期されます**。Action側から二重に導入・上書きする処理だけを削除しています。
 
 ## Private repository認証
 
-kernel sourceがprivate repositoryなので、repositoryのActions secretに次を登録してください。
+manifestからprivate repositoryとprivate submoduleを同期するため、repositoryのActions secretに次を登録してください。
 
 - Secret name: `PRIVATE_REPO_TOKEN`
-- Value: `tqmane/android_kernel_oppo_sm8350-private`をreadできるfine-grained PAT
+- Value: manifestから参照されるprivate repositoryをreadできるfine-grained PAT
+
+現状では少なくとも以下へのread権限が必要です。
+
+- `tqmane/android_kernel_oppo_sm8350-private`
+- `tqmane/SukiSU-Ultra-private`
 
 PATはworkflowやmanifestへ直接書き込みません。Git credential helper経由で`repo sync`にだけ使用します。
 
@@ -49,9 +51,9 @@ LXC_PATCH=true
 ANDROID_PARANOID_NETWORK_OFF=true
 ```
 
-LXC / Docker用configはQGKI fragmentへ追加され、その後`build/build.sh`が最終defconfigを生成します。cgroup runtime patchと`xt_qtaguid` patchも維持しています。
+LXC / Docker用configはLahaina QGKI fragmentへ追加され、その後`build/build.sh`が最終defconfigを生成します。cgroup runtime patchと`xt_qtaguid` patchも維持しています。
 
-KVMは必要な場合のみ有効化できます。
+KVMは必要な場合だけ有効化できます。
 
 ```ini
 ENABLE_KVM=false
