@@ -1,7 +1,9 @@
-name: 大容量云编译
+name: Build OnePlus 9 Pro LXC/Docker kernel
+
 on:
   workflow_dispatch:
 
 jobs:
   build-kernel:
     uses: ./.github/workflows/yun-kernel.yml
+    secrets: inherit
