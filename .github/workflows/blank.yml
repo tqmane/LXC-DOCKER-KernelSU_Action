@@ -6,4 +6,5 @@ on:
 jobs:
   build-kernel:
     uses: ./.github/workflows/yun-kernel.yml
-    secrets: inherit
+    secrets:
+      PRIVATE_REPO_TOKEN: ${{ secrets.GH_PAT }}
