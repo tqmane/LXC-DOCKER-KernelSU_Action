@@ -249,10 +249,17 @@ jobs:
             exit 1
           fi
 
-          IMAGE_PATH="$(find "$DIST_DIR" -maxdepth 1 -type f -name "$KERNEL_IMAGE_NAME" -print -quit)"
-          if [[ -z "$IMAGE_PATH" ]]; then
-            IMAGE_PATH="$(find out -type f -name "$KERNEL_IMAGE_NAME" -print -quit 2>/dev/null || true)"
-          fi
+          find_output() {
+            local name="$1"
+            local found
+            found="$(find "$DIST_DIR" -maxdepth 1 -type f -name "$name" -print -quit 2>/dev/null || true)"
+            if [[ -z "$found" ]]; then
+              found="$(find out -type f -name "$name" -print -quit 2>/dev/null || true)"
+            fi
+            printf '%s' "$found"
+          }
+
+          IMAGE_PATH="$(find_output "$KERNEL_IMAGE_NAME")"
           if [[ -z "$IMAGE_PATH" || ! -f "$IMAGE_PATH" ]]; then
             echo "::error::Built kernel image '$KERNEL_IMAGE_NAME' was not found"
             find "$DIST_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
@@ -261,13 +268,48 @@ jobs:
 
           cp -a "$DIST_DIR" artifacts/dist
           cp "$IMAGE_PATH" "ak3/$KERNEL_IMAGE_NAME"
+
+          # The manifest-provided AnyKernel3 explicitly replaces the boot DTB,
+          # so build the same 3-DTB concatenation used by the known-good package.
+          DTB_LAHAINA="$(find_output lahaina.dtb)"
+          DTB_V2="$(find_output lahaina-v2.dtb)"
+          DTB_V21="$(find_output lahaina-v2.1.dtb)"
+
+          if [[ -z "$DTB_LAHAINA" || -z "$DTB_V2" || -z "$DTB_V21" ]]; then
+            echo "::error::One or more required DTBs were not found: lahaina.dtb, lahaina-v2.dtb, lahaina-v2.1.dtb"
+            echo "Dist DTB files:"
+            find "$DIST_DIR" -maxdepth 1 -type f -name '*.dtb' -printf '%f\n' | sort || true
+            exit 1
+          fi
+
+          cat "$DTB_LAHAINA" "$DTB_V2" "$DTB_V21" > ak3/dtb
+          cp ak3/dtb artifacts/dist/dtb
+
+          # ak3-core.sh accepts either dtbo or dtbo.img and write_boot flashes
+          # it to the dtbo partition, so include the freshly built dtbo.img.
+          DTBO_PATH="$(find_output dtbo.img)"
+          if [[ -z "$DTBO_PATH" || ! -f "$DTBO_PATH" ]]; then
+            echo "::error::Built dtbo.img was not found"
+            find "$DIST_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
+            exit 1
+          fi
+          cp "$DTBO_PATH" ak3/dtbo.img
+          cp "$DTBO_PATH" artifacts/dist/dtbo.img
+
+          echo "Kernel image: $IMAGE_PATH"
+          echo "Combined DTB sources:"
+          printf '  %s\n  %s\n  %s\n' "$DTB_LAHAINA" "$DTB_V2" "$DTB_V21"
+          echo "Combined DTB size: $(stat -c '%s' ak3/dtb) bytes"
+          echo "DTBO image: $DTBO_PATH ($(stat -c '%s' ak3/dtbo.img) bytes)"
+
           (
             cd ak3
             zip -r9 "../artifacts/AnyKernel3-OnePlus9Pro-LXC-Docker-${BUILD_TIME}.zip" . \
               -x '.git/*' '.github/*' 'README.md'
           )
 
-          echo "Kernel image: $IMAGE_PATH"
+          unzip -l "artifacts/AnyKernel3-OnePlus9Pro-LXC-Docker-${BUILD_TIME}.zip" | \
+            grep -E '(^|[[:space:]])(Image|dtb|dtbo\.img)$' || true
           ls -lh artifacts/*.zip
 
       - name: Upload kernel dist
