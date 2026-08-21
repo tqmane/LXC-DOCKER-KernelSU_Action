@@ -122,6 +122,30 @@ jobs:
           chmod +x /tmp/LXC-DOCKER-OPEN-CONFIG.sh
           /tmp/LXC-DOCKER-OPEN-CONFIG.sh "$CONFIG_FRAGMENT" -w
 
+          # The generic helper also enables optional Docker storage drivers.
+          # This OnePlus 5.4 tree has a Btrfs/ZSTD API mismatch and does not
+          # need Btrfs or AUFS for LXC/Docker. Keep OverlayFS as the storage
+          # driver and explicitly disable the incompatible optional drivers.
+          sed -i \
+            -e '/^CONFIG_BTRFS_FS=/d' \
+            -e '/^# CONFIG_BTRFS_FS is not set$/d' \
+            -e '/^CONFIG_BTRFS_FS_POSIX_ACL=/d' \
+            -e '/^# CONFIG_BTRFS_FS_POSIX_ACL is not set$/d' \
+            -e '/^CONFIG_AUFS_FS=/d' \
+            -e '/^# CONFIG_AUFS_FS is not set$/d' \
+            -e '/^CONFIG_OVERLAY_FS=/d' \
+            -e '/^# CONFIG_OVERLAY_FS is not set$/d' \
+            -e '/^CONFIG_!SCHED_WALT/d' \
+            "$CONFIG_FRAGMENT"
+          cat >> "$CONFIG_FRAGMENT" <<'EOF'
+          # CONFIG_BTRFS_FS is not set
+          # CONFIG_AUFS_FS is not set
+          CONFIG_OVERLAY_FS=y
+          EOF
+
+          echo "Storage-driver config after LXC/Docker sanitization:"
+          grep -E '^(CONFIG_(BTRFS_FS|AUFS_FS|OVERLAY_FS)=|# CONFIG_(BTRFS_FS|AUFS_FS|OVERLAY_FS) is not set)' "$CONFIG_FRAGMENT" || true
+
       - name: Apply LXC runtime patches
         if: env.LXC_PATCH == 'true'
         shell: bash
