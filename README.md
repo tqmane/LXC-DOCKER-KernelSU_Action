@@ -1,174 +1,69 @@
-**中文** | [English](README_EN.md)
+# OnePlus 9 Pro LXC + Docker Kernel Action
 
-# KernelSU+LXC+DOCKER Action
+このActionは、OnePlus 9 Pro向けAndroid 15 kernelを **KernelSU/SukiSUなし** でビルドし、LXC / Docker向け設定とパッチを残す構成です。
 
-用于 Non-GKI Kernel 的 Action，具有一定的普遍性，需要了解内核及 Android 的相关知识得以运用。
+## ビルド元
 
-本次修复了一些原来作者的一些bug以及一些内核源码导致的编译失败
-使用的内核源码是https://github.com/typezhi/Rinko_android_kernel_xiaomi_thyme
+manifest:
 
-视频编译教程https://www.bilibili.com/video/BV1jf8czoEZv/
+- `tqmane/android_kernel_manifest`
+- branch: `oneplus/sm8350v_15.0.0_oneplus9pro`
 
-## 警告:warning: :warning: :warning:
+ビルドは単一kernel repositoryを直接`make`する方式ではなく、manifestを`repo init` / `repo sync`した後、Android kernel build frameworkを使います。
 
-如果你不是内核作者，使用他人的劳动成果构建 KernelSU，请仅供自己使用，不要分享给别人，这是对原作者的劳动成果的尊重。
+```bash
+BUILD_CONFIG=kernel/msm-5.4/build.config.lemonade \
+VARIANT=qgki \
+LTO=thin \
+BUILD_KERNEL=1 \
+build/build.sh
+```
 
-## 支持内核
+## KernelSU / SukiSUについて
 
-- `5.4`
-- `4.19`
-- `4.14`
-- `4.9`
+指定manifestは現在、private kernel repositoryの`oneplus/sm8350v_15.0.0_oneplus9pro_sukisu`とKernelSU submoduleを参照しています。
 
-## 使用
+このActionではmanifestの他のproject構成はそのまま使用し、kernel projectだけを以下へlocal manifestでoverrideします。
 
-> 所有 config.env 内的变量均只判断`true`
+- repository: `tqmane/android_kernel_oppo_sm8350-private`
+- branch: `oneplus/sm8350v_15.0.0_oneplus9pro`
 
-> 编译成功后，会在`Action`上传 AnyKernel3，已经关闭设备检查，请在 Twrp 刷入。
+同期後に`KernelSU`、`drivers/kernelsu`、KernelSU/SukiSU submoduleが存在しないことも確認し、残っている場合はビルドを停止します。
 
-Fork 本仓库到你的储存库然后按照以下内容编辑 config.env，之后点击`Star`或`Action`，在左侧可看见`Build Kernel`选项，点击选项会看见右边的大对话框的上面会有`Run workflows`点击它会启动构建。
+## Private repository認証
 
-### Kernel Source
+kernel sourceがprivate repositoryなので、repositoryのActions secretに次を登録してください。
 
-修改为你的内核仓库地址
+- Secret name: `PRIVATE_REPO_TOKEN`
+- Value: `tqmane/android_kernel_oppo_sm8350-private`をreadできるfine-grained PAT
 
-例如: https://github.com/Diva-Room/Miku_kernel_xiaomi_wayne
+PATはworkflowやmanifestへ直接書き込みません。Git credential helper経由で`repo sync`にだけ使用します。
 
-### Kernel Source Branch
+## LXC / Docker
 
-修改为你的内核分支
+`config.env`のデフォルトは以下です。
 
-例如: TDA
+```ini
+LXC_DOCKER=true
+LXC_PATCH=true
+ANDROID_PARANOID_NETWORK_OFF=true
+```
 
-### Kernel Config
+LXC / Docker用configはQGKI fragmentへ追加され、その後`build/build.sh`が最終defconfigを生成します。cgroup runtime patchと`xt_qtaguid` patchも維持しています。
 
-修改为你的内核配置文件名
+KVMは必要な場合のみ有効化できます。
 
-例如: vendor/wayne_defconfig
+```ini
+ENABLE_KVM=false
+```
 
-### Arch
+## 実行方法
 
-例如: arm64
+GitHub Actionsから `Build OnePlus 9 Pro LXC/Docker kernel` を選び、`Run workflow`を実行してください。
 
-### Kernel Image Name
+ビルド後は以下をartifactとしてアップロードします。
 
-修改为需要刷写的 kernel binary，一般与你的 aosp-device tree 里的 BOARD_KERNEL_IMAGE_NAME 是一致的
+- Android kernel build frameworkの`dist`出力
+- manifestに含まれる`ak3`を使ったOnePlus 9 Pro用AnyKernel3 ZIP
 
-例如: Image.gz-dtb
-
-常见还有 Image、Image.gz
-
-### Clang
-
-#### Use custom clang
-
-可以使用除 google 官方的 clang，如[proton-clang](https://github.com/kdrag0n/proton-clang)
-
-#### Custom Clang Source
-
-> 如果是 git 仓库，请填写包含`.git`的链接
-
-支持 git 仓库或者 zip 压缩包的直链
-
-#### Custom cmds
-
-都用自定义 clang 了，自己改改这些配置应该都会吧 :)
-
-#### Clang Branch
-
-由于 [#23](https://github.com/xiaoleGun/KernelSU_Action/issues/23) 的需要，我们提供可自定义 Google 上游分支的选项，主要的有分支有
-| Clang 分支 |
-| ---------- |
-| main |
-| android-gs-bluejay-5.10-android13 |
-| android-msm-bonito-4.9-android12-qpr1 |
-| android-msm-coral-4.14-android13 |
-
-或者其它分支，请根据自己的需求在 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 中寻找
-
-#### Clang version
-
-填写需要使用的 Clang 版本
-| Clang 版本 | 对应 Android 版本 | AOSP-Clang 版本 |
-| ---------- | ----------------- | --------------- |
-| 12.0.5 | Android S | r416183b |
-| 14.0.6 | Android T | r450784d |
-| 14.0.7 | | r450784e |
-| 15.0.1 | | r458507 |
-
-一般 Clang12 就能通过大部分 4.14 及以上的内核的编译
-我自己的 MI 6X 4.19 使用的是 r450784d
-
-### GCC
-
-#### Enable GCC 64
-
-启用 GCC 64 交叉编译
-
-#### Enable GCC 32
-
-启用 GCC 32 交叉编译
-
-### Extra cmds
-
-有的内核需要加入一些其它编译命令，才能正常编译，一般不需要其它的命令，请自行搜索自己内核的资料
-请在命令与命令之间用空格隔开
-
-例如: LLVM=1 LLVM_IAS=1
-
-### Enable KernelSU
-
-启用 KernelSU，用于排查内核故障或单独编译内核
-
-#### KernelSU Branch or Tag
-
-选择 KernelSU 的分支或 tag:
-
-- main 分支(开发版): `KERNELSU_TAG=main`
-- 最新 TAG(稳定版): `KERNELSU_TAG=`
-- 指定 TAG(如`v0.5.2`): `KERNELSU_TAG=v0.5.2`
-
-### Disable LTO
-
-LTO 用于优化内核，但有些时候会导致错误
-
-### Disable CC_WERROR
-
-用于修复某些不支持或关闭了Kprobes的内核，修复KernelSU未检测到开启Kprobes的变量抛出警告导致错误
-
-### Add Kprobes Config
-
-自动在 defconfig 注入参数
-
-### Add overlayfs Config
-
-此参数为 KernelSU 模块和 system 分区读写提供支持
-自动在 defconfig 注入参数
-
-### Enable ccache
-
-启用缓存，让第二次编译内核更快，最少可以减少 2/5 的时间
-
-### Need DTBO
-
-上传 DTBO
-部分设备需要
-
-### Build Boot IMG
-
-> 从之前的 Workflows 合并进来的，可以查看历史提交
-
-编译 boot.img，需要你提供`Source boot image`
-
-### Source Boot Image
-
-故名思义，提供一个源系统可以正常开机的 boot 镜像，需要直链，最好是同一套内核源码以及与你当前系统同一套设备树从 aosp 构建出来的。ramdisk 里面包含分区表以及 init，没有的话构建出来的镜像会无法正常引导。
-
-例如: https://raw.githubusercontent.com/xiaoleGun/KernelSU_action/main/boot/boot-wayne-from-Miku-UI-latest.img
-
-## 感谢
-
-- [AnyKernel3](https://github.com/osm0sis/AnyKernel3)
-- [AOSP](https://android.googlesource.com)
-- [KernelSU](https://github.com/tiann/KernelSU)
-- [xiaoxindada](https://github.com/xiaoxindada)
+主要な設定はルートの`config.env`にまとめています。
