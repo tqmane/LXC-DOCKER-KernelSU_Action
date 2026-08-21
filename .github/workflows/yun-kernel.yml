@@ -116,13 +116,11 @@ jobs:
             exit 1
           fi
 
-          LXC_CONFIG_HELPER="$GITHUB_WORKSPACE/scripts/LXC-DOCKER-OPEN-CONFIG.sh"
-          if [[ ! -f "$LXC_CONFIG_HELPER" ]]; then
-            echo "::error::Vendored LXC/Docker config helper not found: $LXC_CONFIG_HELPER"
-            exit 1
-          fi
-          chmod +x "$LXC_CONFIG_HELPER"
-          "$LXC_CONFIG_HELPER" "$CONFIG_FRAGMENT" -w
+          curl -fsSL \
+            https://raw.githubusercontent.com/wu17481748/android-lxc-docker/main/LXC-DOCKER-OPEN-CONFIG.sh \
+            -o /tmp/LXC-DOCKER-OPEN-CONFIG.sh
+          chmod +x /tmp/LXC-DOCKER-OPEN-CONFIG.sh
+          /tmp/LXC-DOCKER-OPEN-CONFIG.sh "$CONFIG_FRAGMENT" -w
 
       - name: Apply LXC runtime patches
         if: env.LXC_PATCH == 'true'
@@ -131,7 +129,14 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          apply_local_patch() {
+          curl -fsSL \
+            https://raw.githubusercontent.com/wu17481748/android-lxc-docker/main/cgroup.patch \
+            -o /tmp/cgroup.patch
+          curl -fsSL \
+            https://raw.githubusercontent.com/wu17481748/android-lxc-docker/main/xt_qtaguid.patch \
+            -o /tmp/xt_qtaguid.patch
+
+          apply_patch() {
             local patch_file="$1"
             local label="$2"
 
@@ -147,15 +152,15 @@ jobs:
           }
 
           if [[ -f kernel/msm-5.4/kernel/cgroup/cgroup.c ]]; then
-            apply_local_patch "$GITHUB_WORKSPACE/patch/cgroup.patch" "cgroup LXC patch"
+            apply_patch /tmp/cgroup.patch "cgroup LXC patch"
           elif [[ -f kernel/msm-5.4/kernel/cgroup.c ]]; then
-            echo "::warning::Legacy kernel/cgroup.c layout detected; bundled cgroup patch targets kernel/cgroup/cgroup.c, skipping it"
+            echo "::warning::Legacy kernel/cgroup.c layout detected; upstream cgroup patch targets kernel/cgroup/cgroup.c, skipping it"
           else
             echo "::warning::No cgroup.c found; skipping cgroup LXC patch"
           fi
 
           if [[ -f kernel/msm-5.4/net/netfilter/xt_qtaguid.c ]]; then
-            apply_local_patch "$GITHUB_WORKSPACE/patch/xt_qtaguid.patch" "xt_qtaguid LXC patch"
+            apply_patch /tmp/xt_qtaguid.patch "xt_qtaguid LXC patch"
           else
             echo "xt_qtaguid.c not present; patch not required"
           fi
