@@ -116,11 +116,13 @@ jobs:
             exit 1
           fi
 
-          curl -fL \
-            https://github.com/wu17481748/lxc-docker/releases/download/lxc-docker-2config/LXC-DOCKER-OPEN-CONFIG.sh \
-            -o /tmp/LXC-DOCKER-OPEN-CONFIG.sh
-          chmod +x /tmp/LXC-DOCKER-OPEN-CONFIG.sh
-          /tmp/LXC-DOCKER-OPEN-CONFIG.sh "$CONFIG_FRAGMENT" -w
+          LXC_CONFIG_HELPER="$GITHUB_WORKSPACE/scripts/LXC-DOCKER-OPEN-CONFIG.sh"
+          if [[ ! -f "$LXC_CONFIG_HELPER" ]]; then
+            echo "::error::Vendored LXC/Docker config helper not found: $LXC_CONFIG_HELPER"
+            exit 1
+          fi
+          chmod +x "$LXC_CONFIG_HELPER"
+          "$LXC_CONFIG_HELPER" "$CONFIG_FRAGMENT" -w
 
       - name: Apply LXC runtime patches
         if: env.LXC_PATCH == 'true'
@@ -129,28 +131,33 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          curl -fL \
-            https://github.com/fate-think/LXC-DOCKER-KernelSU_Action/releases/download/1.0.0/runcpatch.sh \
-            -o /tmp/runcpatch.sh
-          chmod +x /tmp/runcpatch.sh
+          apply_local_patch() {
+            local patch_file="$1"
+            local label="$2"
 
-          if [[ -f kernel/msm-5.4/kernel/cgroup.c ]]; then
-            /tmp/runcpatch.sh kernel/msm-5.4/kernel/cgroup.c
-          fi
+            if patch --dry-run -d kernel/msm-5.4 -p1 < "$patch_file" >/dev/null 2>&1; then
+              patch -d kernel/msm-5.4 -p1 < "$patch_file"
+              echo "$label applied"
+            elif patch -R --dry-run -d kernel/msm-5.4 -p1 < "$patch_file" >/dev/null 2>&1; then
+              echo "$label is already applied"
+            else
+              echo "::error::$label does not apply cleanly to this kernel branch"
+              exit 1
+            fi
+          }
+
           if [[ -f kernel/msm-5.4/kernel/cgroup/cgroup.c ]]; then
-            /tmp/runcpatch.sh kernel/msm-5.4/kernel/cgroup/cgroup.c
+            apply_local_patch "$GITHUB_WORKSPACE/patch/cgroup.patch" "cgroup LXC patch"
+          elif [[ -f kernel/msm-5.4/kernel/cgroup.c ]]; then
+            echo "::warning::Legacy kernel/cgroup.c layout detected; bundled cgroup patch targets kernel/cgroup/cgroup.c, skipping it"
+          else
+            echo "::warning::No cgroup.c found; skipping cgroup LXC patch"
           fi
 
           if [[ -f kernel/msm-5.4/net/netfilter/xt_qtaguid.c ]]; then
-            PATCH_FILE="$GITHUB_WORKSPACE/patch/xt_qtaguid.patch"
-            if patch --dry-run -d kernel/msm-5.4 -p1 < "$PATCH_FILE" >/dev/null 2>&1; then
-              patch -d kernel/msm-5.4 -p1 < "$PATCH_FILE"
-            elif patch -R --dry-run -d kernel/msm-5.4 -p1 < "$PATCH_FILE" >/dev/null 2>&1; then
-              echo "xt_qtaguid LXC patch is already applied"
-            else
-              echo "::error::xt_qtaguid LXC patch does not apply cleanly to this kernel branch"
-              exit 1
-            fi
+            apply_local_patch "$GITHUB_WORKSPACE/patch/xt_qtaguid.patch" "xt_qtaguid LXC patch"
+          else
+            echo "xt_qtaguid.c not present; patch not required"
           fi
 
       - name: Disable Android paranoid network
