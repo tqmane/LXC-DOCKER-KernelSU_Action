@@ -10,7 +10,7 @@ on:
 
 jobs:
   build:
-    name: OnePlus 9 Pro / no KernelSU / LXC + Docker
+    name: OnePlus 9 Pro / manifest / LXC + Docker
     runs-on: ubuntu-latest
     if: github.event_name != 'watch' || github.event.repository.owner.id == github.event.sender.id
 
@@ -32,9 +32,9 @@ jobs:
           set +a
 
           for key in \
-            MANIFEST_REPO MANIFEST_BRANCH KERNEL_PROJECT KERNEL_PATH KERNEL_BRANCH \
-            BUILD_CONFIG VARIANT LTO BUILD_KERNEL KERNEL_IMAGE_NAME CONFIG_FRAGMENT \
-            LXC_DOCKER LXC_PATCH ANDROID_PARANOID_NETWORK_OFF ENABLE_KVM ENABLE_CCACHE; do
+            MANIFEST_REPO MANIFEST_BRANCH BUILD_CONFIG VARIANT LTO BUILD_KERNEL \
+            KERNEL_IMAGE_NAME CONFIG_FRAGMENT LXC_DOCKER LXC_PATCH \
+            ANDROID_PARANOID_NETWORK_OFF ENABLE_KVM ENABLE_CCACHE; do
             value="${!key:-}"
             if [[ -z "$value" ]]; then
               echo "::error::Missing $key in config.env"
@@ -77,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${PRIVATE_REPO_TOKEN:-}" ]]; then
-            echo "::error::PRIVATE_REPO_TOKEN is required because the manifest uses tqmane/android_kernel_oppo_sm8350-private. Add a fine-grained PAT with read access to that repository as an Actions secret named PRIVATE_REPO_TOKEN."
+            echo "::error::PRIVATE_REPO_TOKEN is required. The manifest references private repositories, including tqmane/android_kernel_oppo_sm8350-private and its private KernelSU/SukiSU submodule. Add a fine-grained PAT with read access to every private repository referenced by the manifest."
             exit 1
           fi
 
@@ -85,7 +85,7 @@ jobs:
           printf 'https://x-access-token:%s@github.com\n' "$PRIVATE_REPO_TOKEN" > "$HOME/.git-credentials"
           chmod 600 "$HOME/.git-credentials"
 
-      - name: Initialize manifest and force non-KernelSU kernel branch
+      - name: Initialize and sync kernel manifest
         shell: bash
         run: |
           set -euo pipefail
@@ -93,45 +93,16 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           repo init -u "$MANIFEST_REPO" -b "$MANIFEST_BRANCH"
-
-          # The source manifest currently points at the *_sukisu branch and syncs
-          # its KernelSU submodule. Keep the manifest as the source of truth for
-          # build tools/modules/device tree/AnyKernel3, but replace only the
-          # kernel project with the clean non-KSU branch requested by this action.
-          mkdir -p .repo/local_manifests
-          cat > .repo/local_manifests/no-kernelsu.xml <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <manifest>
-            <remove-project name="$KERNEL_PROJECT" />
-            <project
-                name="$KERNEL_PROJECT"
-                path="$KERNEL_PATH"
-                revision="$KERNEL_BRANCH"
-                remote="tqmane"
-                clone-depth="1" />
-          </manifest>
-          EOF
-
           repo sync --force-sync --no-clone-bundle --current-branch --no-tags -j"$(nproc --all)"
 
-      - name: Verify KernelSU is absent
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          test -d kernel/msm-5.4
+          test -d modules_devicetree
+          test -d ak3
 
-          if [[ -e "$KERNEL_PATH/KernelSU" || -e "$KERNEL_PATH/drivers/kernelsu" ]]; then
-            echo "::error::KernelSU content is still present after sync. Refusing to build."
-            exit 1
+          echo "Kernel source: $(git -C kernel/msm-5.4 rev-parse HEAD)"
+          if [[ -e kernel/msm-5.4/KernelSU ]]; then
+            echo "KernelSU/SukiSU source is present because it is part of the supplied manifest/kernel repository. This Action does not install or modify it."
           fi
-
-          if [[ -f "$KERNEL_PATH/.gitmodules" ]] && grep -qi 'KernelSU\|SukiSU' "$KERNEL_PATH/.gitmodules"; then
-            echo "::error::KernelSU/SukiSU submodule is still configured. Refusing to build."
-            exit 1
-          fi
-
-          echo "Kernel source: $(git -C "$KERNEL_PATH" rev-parse HEAD)"
-          echo "KernelSU/SukiSU: absent"
 
       - name: Enable LXC and Docker kernel configuration
         if: env.LXC_DOCKER == 'true'
@@ -163,18 +134,18 @@ jobs:
             -o /tmp/runcpatch.sh
           chmod +x /tmp/runcpatch.sh
 
-          if [[ -f "$KERNEL_PATH/kernel/cgroup.c" ]]; then
-            /tmp/runcpatch.sh "$KERNEL_PATH/kernel/cgroup.c"
+          if [[ -f kernel/msm-5.4/kernel/cgroup.c ]]; then
+            /tmp/runcpatch.sh kernel/msm-5.4/kernel/cgroup.c
           fi
-          if [[ -f "$KERNEL_PATH/kernel/cgroup/cgroup.c" ]]; then
-            /tmp/runcpatch.sh "$KERNEL_PATH/kernel/cgroup/cgroup.c"
+          if [[ -f kernel/msm-5.4/kernel/cgroup/cgroup.c ]]; then
+            /tmp/runcpatch.sh kernel/msm-5.4/kernel/cgroup/cgroup.c
           fi
 
-          if [[ -f "$KERNEL_PATH/net/netfilter/xt_qtaguid.c" ]]; then
+          if [[ -f kernel/msm-5.4/net/netfilter/xt_qtaguid.c ]]; then
             PATCH_FILE="$GITHUB_WORKSPACE/patch/xt_qtaguid.patch"
-            if patch --dry-run -d "$KERNEL_PATH" -p1 < "$PATCH_FILE" >/dev/null 2>&1; then
-              patch -d "$KERNEL_PATH" -p1 < "$PATCH_FILE"
-            elif patch -R --dry-run -d "$KERNEL_PATH" -p1 < "$PATCH_FILE" >/dev/null 2>&1; then
+            if patch --dry-run -d kernel/msm-5.4 -p1 < "$PATCH_FILE" >/dev/null 2>&1; then
+              patch -d kernel/msm-5.4 -p1 < "$PATCH_FILE"
+            elif patch -R --dry-run -d kernel/msm-5.4 -p1 < "$PATCH_FILE" >/dev/null 2>&1; then
               echo "xt_qtaguid LXC patch is already applied"
             else
               echo "::error::xt_qtaguid LXC patch does not apply cleanly to this kernel branch"
@@ -208,7 +179,7 @@ jobs:
         if: env.ENABLE_CCACHE == 'true'
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: oneplus9pro-lxc-docker-no-ksu
+          key: oneplus9pro-lxc-docker-manifest
           max-size: 2G
 
       - name: Build with Android kernel build framework
@@ -253,12 +224,6 @@ jobs:
           fi
 
           cp -a "$DIST_DIR" artifacts/dist
-
-          if [[ ! -d ak3 ]]; then
-            echo "::error::AnyKernel3 project from the manifest is missing"
-            exit 1
-          fi
-
           cp "$IMAGE_PATH" "ak3/$KERNEL_IMAGE_NAME"
           (
             cd ak3
@@ -266,7 +231,6 @@ jobs:
               -x '.git/*' '.github/*' 'README.md'
           )
 
-          echo "DIST_DIR=$DIST_DIR" >> "$GITHUB_ENV"
           echo "Kernel image: $IMAGE_PATH"
           ls -lh artifacts/*.zip
 
