@@ -77,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${PRIVATE_REPO_TOKEN:-}" ]]; then
-            echo "::error::PRIVATE_REPO_TOKEN is required. The manifest references private repositories, including tqmane/android_kernel_oppo_sm8350-private and its private KernelSU/SukiSU submodule. Add a fine-grained PAT with read access to every private repository referenced by the manifest."
+            echo "::error::PRIVATE_REPO_TOKEN is required. Add a fine-grained PAT with read access to every private repository referenced by the manifest."
             exit 1
           fi
 
@@ -100,11 +100,8 @@ jobs:
           test -d ak3
 
           echo "Kernel source: $(git -C kernel/msm-5.4 rev-parse HEAD)"
-          if [[ -e kernel/msm-5.4/KernelSU ]]; then
-            echo "KernelSU/SukiSU source is present because it is part of the supplied manifest/kernel repository. This Action does not install or modify it."
-          fi
 
-      - name: Enable LXC and Docker kernel configuration
+      - name: Enable Android-safe minimal LXC and Docker configuration
         if: env.LXC_DOCKER == 'true'
         shell: bash
         run: |
@@ -116,77 +113,95 @@ jobs:
             exit 1
           fi
 
-          curl -fsSL \
-            https://raw.githubusercontent.com/wu17481748/android-lxc-docker/main/LXC-DOCKER-OPEN-CONFIG.sh \
-            -o /tmp/LXC-DOCKER-OPEN-CONFIG.sh
-          chmod +x /tmp/LXC-DOCKER-OPEN-CONFIG.sh
-          /tmp/LXC-DOCKER-OPEN-CONFIG.sh "$CONFIG_FRAGMENT" -w
+          set_y() {
+            local symbol="$1"
+            sed -i -E "/^${symbol}=|^# ${symbol} is not set$/d" "$CONFIG_FRAGMENT"
+            echo "${symbol}=y" >> "$CONFIG_FRAGMENT"
+          }
 
-          # The generic helper also enables optional Docker storage drivers.
-          # This OnePlus 5.4 tree has a Btrfs/ZSTD API mismatch and does not
-          # need Btrfs or AUFS for LXC/Docker. Keep OverlayFS as the storage
-          # driver and explicitly disable the incompatible optional drivers.
-          sed -i \
-            -e '/^CONFIG_BTRFS_FS=/d' \
-            -e '/^# CONFIG_BTRFS_FS is not set$/d' \
-            -e '/^CONFIG_BTRFS_FS_POSIX_ACL=/d' \
-            -e '/^# CONFIG_BTRFS_FS_POSIX_ACL is not set$/d' \
-            -e '/^CONFIG_AUFS_FS=/d' \
-            -e '/^# CONFIG_AUFS_FS is not set$/d' \
-            -e '/^CONFIG_OVERLAY_FS=/d' \
-            -e '/^# CONFIG_OVERLAY_FS is not set$/d' \
-            -e '/^CONFIG_!SCHED_WALT/d' \
-            "$CONFIG_FRAGMENT"
-          cat >> "$CONFIG_FRAGMENT" <<'EOF'
-          # CONFIG_BTRFS_FS is not set
-          # CONFIG_AUFS_FS is not set
-          CONFIG_OVERLAY_FS=y
-          EOF
+          set_n() {
+            local symbol="$1"
+            sed -i -E "/^${symbol}=|^# ${symbol} is not set$/d" "$CONFIG_FRAGMENT"
+            echo "# ${symbol} is not set" >> "$CONFIG_FRAGMENT"
+          }
 
-          echo "Storage-driver config after LXC/Docker sanitization:"
-          grep -E '^(CONFIG_(BTRFS_FS|AUFS_FS|OVERLAY_FS)=|# CONFIG_(BTRFS_FS|AUFS_FS|OVERLAY_FS) is not set)' "$CONFIG_FRAGMENT" || true
+          # Keep the vendor/WALT scheduler configuration intact. Do NOT enable
+          # FAIR_GROUP_SCHED, RT_GROUP_SCHED or SCHED_AUTOGROUP here.
+          # The stock QGKI config already provides most Docker primitives;
+          # only add the missing/rootful-container pieces and reassert the
+          # already-safe networking/storage requirements.
+          for symbol in \
+            CONFIG_NAMESPACES \
+            CONFIG_PID_NS \
+            CONFIG_IPC_NS \
+            CONFIG_NET_NS \
+            CONFIG_UTS_NS \
+            CONFIG_POSIX_MQUEUE \
+            CONFIG_CGROUPS \
+            CONFIG_CGROUP_CPUACCT \
+            CONFIG_CGROUP_DEVICE \
+            CONFIG_CGROUP_FREEZER \
+            CONFIG_CGROUP_SCHED \
+            CONFIG_CGROUP_PIDS \
+            CONFIG_CPUSETS \
+            CONFIG_MEMCG \
+            CONFIG_CGROUP_BPF \
+            CONFIG_BPF_SYSCALL \
+            CONFIG_SECCOMP \
+            CONFIG_SECCOMP_FILTER \
+            CONFIG_FHANDLE \
+            CONFIG_NETFILTER \
+            CONFIG_NF_CONNTRACK \
+            CONFIG_NETFILTER_XTABLES \
+            CONFIG_NETFILTER_XT_MATCH_ADDRTYPE \
+            CONFIG_NETFILTER_XT_MATCH_CONNTRACK \
+            CONFIG_IP_NF_IPTABLES \
+            CONFIG_IP_NF_FILTER \
+            CONFIG_IP_NF_NAT \
+            CONFIG_IP_NF_TARGET_MASQUERADE \
+            CONFIG_BRIDGE \
+            CONFIG_VETH \
+            CONFIG_OVERLAY_FS; do
+            set_y "$symbol"
+          done
 
-      - name: Apply LXC runtime patches
+          # Explicitly keep optional storage drivers that previously broke the
+          # build disabled. OverlayFS is enough for rootful Docker here.
+          set_n CONFIG_BTRFS_FS
+          set_n CONFIG_AUFS_FS
+
+          echo "Minimal LXC/Docker fragment additions:"
+          grep -E 'CONFIG_(PID_NS|IPC_NS|NET_NS|UTS_NS|CGROUP_DEVICE|CGROUP_PIDS|FHANDLE|SECCOMP_FILTER|VETH|OVERLAY_FS|FAIR_GROUP_SCHED|RT_GROUP_SCHED|SCHED_AUTOGROUP)' "$CONFIG_FRAGMENT" || true
+
+      - name: Apply optional LXC runtime patches
         if: env.LXC_PATCH == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          curl -fsSL \
-            https://raw.githubusercontent.com/wu17481748/android-lxc-docker/main/cgroup.patch \
-            -o /tmp/cgroup.patch
-          curl -fsSL \
-            https://raw.githubusercontent.com/wu17481748/android-lxc-docker/main/xt_qtaguid.patch \
-            -o /tmp/xt_qtaguid.patch
+          curl -fsSL https://raw.githubusercontent.com/wu17481748/android-lxc-docker/main/cgroup.patch -o /tmp/cgroup.patch
+          curl -fsSL https://raw.githubusercontent.com/wu17481748/android-lxc-docker/main/xt_qtaguid.patch -o /tmp/xt_qtaguid.patch
 
           apply_patch() {
             local patch_file="$1"
             local label="$2"
-
             if patch --dry-run -d kernel/msm-5.4 -p1 < "$patch_file" >/dev/null 2>&1; then
               patch -d kernel/msm-5.4 -p1 < "$patch_file"
               echo "$label applied"
             elif patch -R --dry-run -d kernel/msm-5.4 -p1 < "$patch_file" >/dev/null 2>&1; then
               echo "$label is already applied"
             else
-              echo "::error::$label does not apply cleanly to this kernel branch"
+              echo "::error::$label does not apply cleanly"
               exit 1
             fi
           }
 
           if [[ -f kernel/msm-5.4/kernel/cgroup/cgroup.c ]]; then
             apply_patch /tmp/cgroup.patch "cgroup LXC patch"
-          elif [[ -f kernel/msm-5.4/kernel/cgroup.c ]]; then
-            echo "::warning::Legacy kernel/cgroup.c layout detected; upstream cgroup patch targets kernel/cgroup/cgroup.c, skipping it"
-          else
-            echo "::warning::No cgroup.c found; skipping cgroup LXC patch"
           fi
-
           if [[ -f kernel/msm-5.4/net/netfilter/xt_qtaguid.c ]]; then
             apply_patch /tmp/xt_qtaguid.patch "xt_qtaguid LXC patch"
-          else
-            echo "xt_qtaguid.c not present; patch not required"
           fi
 
       - name: Disable Android paranoid network
@@ -245,7 +260,6 @@ jobs:
           DIST_DIR="$(find out -type d -name dist -print -quit 2>/dev/null || true)"
           if [[ -z "$DIST_DIR" || ! -d "$DIST_DIR" ]]; then
             echo "::error::Kernel build completed without a dist directory"
-            find out -maxdepth 4 -type f 2>/dev/null | head -200 || true
             exit 1
           fi
 
@@ -262,43 +276,32 @@ jobs:
           IMAGE_PATH="$(find_output "$KERNEL_IMAGE_NAME")"
           if [[ -z "$IMAGE_PATH" || ! -f "$IMAGE_PATH" ]]; then
             echo "::error::Built kernel image '$KERNEL_IMAGE_NAME' was not found"
-            find "$DIST_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
             exit 1
           fi
 
           cp -a "$DIST_DIR" artifacts/dist
           cp "$IMAGE_PATH" "ak3/$KERNEL_IMAGE_NAME"
 
-          # The manifest-provided AnyKernel3 explicitly replaces the boot DTB,
-          # so build the same 3-DTB concatenation used by the known-good package.
           DTB_LAHAINA="$(find_output lahaina.dtb)"
           DTB_V2="$(find_output lahaina-v2.dtb)"
           DTB_V21="$(find_output lahaina-v2.1.dtb)"
-
           if [[ -z "$DTB_LAHAINA" || -z "$DTB_V2" || -z "$DTB_V21" ]]; then
-            echo "::error::One or more required DTBs were not found: lahaina.dtb, lahaina-v2.dtb, lahaina-v2.1.dtb"
-            echo "Dist DTB files:"
+            echo "::error::One or more required DTBs were not found"
             find "$DIST_DIR" -maxdepth 1 -type f -name '*.dtb' -printf '%f\n' | sort || true
             exit 1
           fi
-
           cat "$DTB_LAHAINA" "$DTB_V2" "$DTB_V21" > ak3/dtb
           cp ak3/dtb artifacts/dist/dtb
 
-          # ak3-core.sh accepts either dtbo or dtbo.img and write_boot flashes
-          # it to the dtbo partition, so include the freshly built dtbo.img.
           DTBO_PATH="$(find_output dtbo.img)"
           if [[ -z "$DTBO_PATH" || ! -f "$DTBO_PATH" ]]; then
             echo "::error::Built dtbo.img was not found"
-            find "$DIST_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
             exit 1
           fi
           cp "$DTBO_PATH" ak3/dtbo.img
           cp "$DTBO_PATH" artifacts/dist/dtbo.img
 
           echo "Kernel image: $IMAGE_PATH"
-          echo "Combined DTB sources:"
-          printf '  %s\n  %s\n  %s\n' "$DTB_LAHAINA" "$DTB_V2" "$DTB_V21"
           echo "Combined DTB size: $(stat -c '%s' ak3/dtb) bytes"
           echo "DTBO image: $DTBO_PATH ($(stat -c '%s' ak3/dtbo.img) bytes)"
 
@@ -307,9 +310,6 @@ jobs:
             zip -r9 "../artifacts/AnyKernel3-OnePlus9Pro-LXC-Docker-${BUILD_TIME}.zip" . \
               -x '.git/*' '.github/*' 'README.md'
           )
-
-          unzip -l "artifacts/AnyKernel3-OnePlus9Pro-LXC-Docker-${BUILD_TIME}.zip" | \
-            grep -E '(^|[[:space:]])(Image|dtb|dtbo\.img)$' || true
           ls -lh artifacts/*.zip
 
       - name: Upload kernel dist
