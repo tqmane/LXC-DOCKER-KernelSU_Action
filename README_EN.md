@@ -34,7 +34,7 @@ BUILD_CONFIG=kernel/msm-5.4/build.config.lemonade.container build/build.sh
 
 ## Plain profile
 
-The boot-tested Android 17 BPF configuration is kept intact. The Action does not add Docker, LXC, or KVM configuration and does not patch kernel sources at build time.
+The boot-tested Android 17 BPF configuration is kept intact. The Action does not add Docker, LXC, or KVM configuration and does not modify tracked kernel sources.
 
 The resulting configuration is checked for the required BPF/BTF options, disabled function tracing, and the absence of PID namespaces and KVM.
 
@@ -50,13 +50,23 @@ The dedicated kernel branch applies `lahaina_CONTAINER.config` after the normal 
 
 The OPlus WALT scheduler model is retained, so `FAIR_GROUP_SCHED` and `RT_GROUP_SCHED` remain disabled. `USER_NS` also remains disabled.
 
-The unrelated Reno10 `module.c`, OverlayFS implementation, `user.h`, and external runtime patches used by the referenced 9RT workflow are deliberately not copied. The SM8350 source remains intact and the feature set is enabled through a dedicated config profile.
+### GKI 1.0 KABI adaptation
+
+Enabling `SYSVIPC` and `POSIX_MQUEUE` directly can move established fields in `task_struct` and `user_struct`, potentially breaking the KMI or symbol CRCs expected by stock vendor modules. The container branch therefore runs `scripts/gki/apply_container_kabi.py` and relocates the new state into unused Android KABI slots:
+
+- `struct sysv_sem` → `task_struct` slot 3;
+- `struct sysv_shm` → `task_struct` slots 4 and 5;
+- `mq_bytes` → `user_struct` slot 1.
+
+The Action records the adaptation in a deterministic local commit before building, preventing a `-dirty` suffix in the kernel release or module vermagic. The effective build commit SHA is included in the artifacts.
+
+The unrelated Reno10 `module.c`, OverlayFS implementation, wholesale `user.h` replacement, and external runtime patches used by the referenced 9RT workflow are deliberately not copied. Only the dedicated SM8350 config and a minimal, reviewable KABI adaptation are used.
 
 ## KernelSU / SukiSU
 
 The Action does not clone KernelSU, run a setup script, or inject KSU configuration.
 
-The private kernel tracked by the manifest already contains a SukiSU submodule, which is synced as a normal source dependency. No duplicate installation or override is performed by the Action.
+The private kernel tracked by the manifest already contains a SukiSU submodule. It is synced to the exact gitlink pinned by the superproject, with no duplicate installation or override by the Action.
 
 ## Private repository authentication
 
@@ -82,6 +92,7 @@ Each profile uploads:
 
 - the Android kernel build framework `dist` directory;
 - the effective kernel `.config`;
+- the exact effective kernel commit SHA;
 - a flashable AnyKernel3 ZIP from the manifest-provided `ak3` tree.
 
 DTBs are concatenated in the order used by the boot-tested OnePlus 9 Pro package:
@@ -90,4 +101,4 @@ DTBs are concatenated in the order used by the boot-tested OnePlus 9 Pro package
 lahaina.dtb -> lahaina-v2.1.dtb -> lahaina-v2.dtb
 ```
 
-References and build configs are managed in `config.env`. The container profile is compile-tested by CI, but device runtime validation should still cover cold boot and Docker, LXC, and KVM separately with a known rollback path available.
+References and build configs are managed in `config.env`. The container profile is compile-tested by CI, but device runtime validation should still cover cold boot and Docker, LXC, and KVM separately with a known rollback path available. KVM runtime also depends on the device firmware and hypervisor exposing usable EL2 support.
