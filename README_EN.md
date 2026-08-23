@@ -9,8 +9,8 @@ This Action builds the OnePlus 9 Pro Linux 5.4.254 kernel from the Android kerne
 
 - Manifest: `tqmane/android_kernel_manifest`
 - Manifest branch: `ci/a17-bpf-runtime-hardening`
-- Plain kernel: `fix/android17-bpf-task-storage-recursion`
-- Container kernel: `oneplus/sm8350v_17.0.0_oneplus9pro_sukisu_lxc_docker_kvm`
+- Plain kernel: `fix/a17-bpf-task-storage-hardening`
+- Container kernel: `oneplus/sm8350v_17.0.0_oneplus9pro_sukisu_lxc_docker_kvm_v2`
 
 Both profiles use:
 
