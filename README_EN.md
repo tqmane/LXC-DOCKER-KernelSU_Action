@@ -1,69 +1,77 @@
-# OnePlus 9 Pro LXC + Docker Kernel Action
+# OnePlus 9 Pro Android 17 BPF Kernel Action
 
-This Action syncs and builds the supplied OnePlus 9 Pro manifest as-is, removes the old KernelSU installation logic from the Action itself, and keeps the LXC/Docker configuration and runtime patches.
+This repository reproducibly builds the Android 17 BPF 5.15 compatibility backport for the OnePlus 9 Pro (SM8350 / GKI 1.0) through the Android kernel manifest and build framework.
 
-## Source manifest
+The Action does not install KernelSU. It keeps the SukiSU source and submodule already referenced by the private kernel manifest and builds them without running another setup script.
 
-- Repository: `tqmane/android_kernel_manifest`
-- Branch: `oneplus/sm8350v_15.0.0_oneplus9pro`
+## Sources
 
-The workflow uses `repo init` / `repo sync` and the Android kernel build framework instead of cloning a single kernel repository and invoking `make` directly.
+- manifest: `tqmane/android_kernel_manifest`
+- manifest branch: `oneplus/sm8350v_15.0.0_oneplus9pro`
+- default kernel ref: `oneplus/sm8350v_17.0.0_oneplus9pro_sukisu`
+- build config: `kernel/msm-5.4/build.config.lemonade`
+- variant: `qgki`
+- LTO: `thin`
 
-```bash
-BUILD_CONFIG=kernel/msm-5.4/build.config.lemonade \
-VARIANT=qgki \
-LTO=thin \
-BUILD_KERNEL=1 \
-build/build.sh
-```
+The manifest branch name still contains 15.0.0, but its kernel project points to the Android 17 BPF branch. The `kernel_ref` workflow input can select another branch, tag, or commit while keeping the same manifest and vendor tree.
 
-> The manifest README currently refers to `build.config.msm.lemonade`, but the actual OnePlus 9/9 Pro kernel tree contains `build.config.lemonade`.
+## Build profiles
 
-## KernelSU / SukiSU behavior
+Run `Build OnePlus 9 Pro Android 17 BPF kernel` from GitHub Actions and choose one profile.
 
-This Action no longer clones KernelSU, runs a KernelSU `setup.sh`, or injects KSU-specific configuration.
+### `plain`
 
-The supplied manifest itself currently references a private kernel branch and a KernelSU/SukiSU submodule. Therefore, **KernelSU/SukiSU that already belongs to the manifest is still synced exactly as specified by that manifest**. Only the Action-level duplicate installation/override logic has been removed.
+- Leaves the synced QGKI config unchanged.
+- Adds no Docker, LXC, or KVM options and applies no source patch.
+- Builds only what is already present in the selected Android 17 BPF/SukiSU kernel ref.
+
+### `containers`
+
+Extends the same Android 17 BPF source at build time with:
+
+- LXC namespaces, cgroup v1, checkpoint/restore, and SysV IPC
+- Docker bridge/NAT/veth/macvlan/ipvlan/vxlan and OverlayFS support
+- seccomp and supporting diagnostic options
+- arm64 KVM and vhost-net
+- disabled `CONFIG_ANDROID_PARANOID_NETWORK` for rootful containers
+- a small cgroup v1 NOPREFIX compatibility-alias patch
+
+The vendor WALT scheduler is preserved. The profile does not force `FAIR_GROUP_SCHED`, `RT_GROUP_SCHED`, or `SCHED_AUTOGROUP`, and it does not add AUFS or Btrfs.
+
+The Docker workflow in `miaizhe/Kernel_oplus_sm8350_9RT` was reviewed for requirements, but this implementation deliberately does not download and replace `util.c`, `module.c`, or `user.h` from an unrelated device. It keeps the OnePlus 9 Pro source and KMI intact and uses only auditable config additions plus the local cgroup patch.
+
+Kernel-side KVM support is enabled, but runtime availability still depends on EL2, the bootloader/firmware, and the Android userspace QEMU setup.
+
+## Configuration validation
+
+After each build, the generated `.config` is checked. The workflow fails unless:
+
+- BPF syscall, JIT, BPF LSM, BTF, CFI, and Shadow Call Stack are enabled
+- `CONFIG_LSM` contains `bpf`
+- `CONFIG_FUNCTION_TRACER` remains disabled to avoid the unverified arm64 direct-trampoline path
+- the `containers` profile contains the required namespace, cgroup, seccomp, veth, OverlayFS, KVM, and vhost-net options
 
 ## Private repository authentication
 
-The manifest references private repositories and a private submodule. Add the following Actions secret to this repository:
-
-- Secret name: `PRIVATE_REPO_TOKEN`
-- Value: a fine-grained PAT with read access to every private repository referenced by the manifest
-
-At minimum, the current manifest requires read access to:
+Create an Actions secret named `GH_PAT`. Its fine-grained token needs read access to at least:
 
 - `tqmane/android_kernel_oppo_sm8350-private`
-- `tqmane/SukiSU-Ultra-private`
+- the private SukiSU repository referenced by the manifest/kernel
 
-The PAT is not embedded in the workflow or manifest. It is provided to Git through the credential helper for `repo sync`.
+The token is used only as a repo/submodule sync credential and is not written to the manifest or artifacts.
 
-## LXC / Docker
+## Running a build
 
-The default `config.env` keeps LXC and Docker enabled:
+1. Open `Build OnePlus 9 Pro Android 17 BPF kernel` in Actions.
+2. Select `Run workflow`.
+3. Choose `plain` or `containers`.
+4. Optionally replace `kernel_ref` with a pull-request branch or commit SHA.
 
-```ini
-LXC_DOCKER=true
-LXC_PATCH=true
-ANDROID_PARANOID_NETWORK_OFF=true
-```
+## Artifacts
 
-The LXC/Docker configuration is applied to the Lahaina QGKI fragment before `build/build.sh` generates the final defconfig. The cgroup runtime patch and `xt_qtaguid` patch are also retained.
+- Android kernel build-framework `dist`
+- final `kernel.config`
+- `build-info.txt` recording the profile and kernel/manifest/modules revisions
+- OnePlus 9 Pro AnyKernel3 ZIP containing Image, combined DTB, and dtbo.img
 
-KVM remains optional:
-
-```ini
-ENABLE_KVM=false
-```
-
-## Running the build
-
-Open GitHub Actions, select `Build OnePlus 9 Pro LXC/Docker kernel`, and choose `Run workflow`.
-
-The workflow uploads:
-
-- the Android kernel build framework `dist` output;
-- a OnePlus 9 Pro AnyKernel3 ZIP built from the `ak3` project in the manifest.
-
-The main build settings are in the repository root `config.env`.
+Artifact names include `plain` or `containers` to prevent accidental mix-ups.
