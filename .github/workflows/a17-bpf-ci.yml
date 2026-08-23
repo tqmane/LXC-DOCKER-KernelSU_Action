@@ -30,3 +30,148 @@ jobs:
       build_profile: containers
     secrets:
       PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_PAT }}
+
+  stock-module-kmi:
+    name: Compare stock module KMI
+    needs:
+      - plain
+      - containers
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Install module inspection tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y kmod
+
+      - name: Download plain dist
+        uses: actions/download-artifact@v4
+        with:
+          pattern: OnePlus9Pro-A17-BPF-plain-dist-*
+          path: artifacts/plain
+          merge-multiple: true
+
+      - name: Download container dist
+        uses: actions/download-artifact@v4
+        with:
+          pattern: OnePlus9Pro-A17-BPF-containers-dist-*
+          path: artifacts/containers
+          merge-multiple: true
+
+      - name: Compare module version requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import subprocess
+          from pathlib import Path
+
+          plain_root = Path("artifacts/plain")
+          container_root = Path("artifacts/containers")
+          report_path = Path("module-kmi-report.json")
+
+          def module_index(root: Path) -> dict[str, Path]:
+              index: dict[str, Path] = {}
+              duplicates: dict[str, list[str]] = {}
+              for module in sorted(root.rglob("*.ko")):
+                  name = module.name
+                  if name in index:
+                      duplicates.setdefault(name, [str(index[name])]).append(str(module))
+                  else:
+                      index[name] = module
+              if duplicates:
+                  formatted = json.dumps(duplicates, indent=2, sort_keys=True)
+                  raise SystemExit(f"duplicate module basenames prevent reliable comparison:\n{formatted}")
+              return index
+
+          def modversions(module: Path) -> dict[str, str]:
+              proc = subprocess.run(
+                  ["modprobe", "--dump-modversions", str(module)],
+                  check=False,
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+              )
+              if proc.returncode != 0:
+                  raise RuntimeError(
+                      f"failed to inspect {module}: {proc.stderr.strip() or proc.stdout.strip()}"
+                  )
+
+              versions: dict[str, str] = {}
+              for raw in proc.stdout.splitlines():
+                  fields = raw.split()
+                  if len(fields) != 2:
+                      continue
+                  crc, symbol = fields
+                  versions[symbol] = crc.lower()
+              return versions
+
+          plain_modules = module_index(plain_root)
+          container_modules = module_index(container_root)
+          if not plain_modules:
+              raise SystemExit("plain dist contains no .ko modules; stock-module KMI was not validated")
+          if not container_modules:
+              raise SystemExit("container dist contains no .ko modules; stock-module KMI was not validated")
+
+          missing_modules: list[str] = []
+          changed_requirements: dict[str, dict[str, object]] = {}
+          inspected = 0
+
+          for name, plain_module in sorted(plain_modules.items()):
+              container_module = container_modules.get(name)
+              if container_module is None:
+                  missing_modules.append(name)
+                  continue
+
+              plain_versions = modversions(plain_module)
+              container_versions = modversions(container_module)
+              inspected += 1
+
+              symbols = sorted(set(plain_versions) | set(container_versions))
+              changes: dict[str, dict[str, str | None]] = {}
+              for symbol in symbols:
+                  plain_crc = plain_versions.get(symbol)
+                  container_crc = container_versions.get(symbol)
+                  if plain_crc != container_crc:
+                      changes[symbol] = {
+                          "plain": plain_crc,
+                          "containers": container_crc,
+                      }
+
+              if changes:
+                  changed_requirements[name] = {
+                      "plain_path": str(plain_module),
+                      "container_path": str(container_module),
+                      "symbols": changes,
+                  }
+
+          extra_modules = sorted(set(container_modules) - set(plain_modules))
+          report = {
+              "plain_module_count": len(plain_modules),
+              "container_module_count": len(container_modules),
+              "inspected_matching_modules": inspected,
+              "missing_from_container": missing_modules,
+              "extra_in_container": extra_modules,
+              "changed_modversion_requirements": changed_requirements,
+          }
+          report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+          print(report_path.read_text())
+
+          if missing_modules or changed_requirements:
+              raise SystemExit(
+                  "container profile is not compatible with the plain/stock module modversion set"
+              )
+          PY
+
+      - name: Upload KMI report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnePlus9Pro-A17-BPF-module-KMI-report
+          path: module-kmi-report.json
+          if-no-files-found: error
