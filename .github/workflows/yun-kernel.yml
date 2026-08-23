@@ -236,12 +236,12 @@ jobs:
             }
           }
 
-          require_n() {
+          require_disabled() {
             local symbol="$1"
-            grep -qx "# ${symbol} is not set" "$config_path" || {
+            if grep -Eq "^${symbol}=(y|m)$" "$config_path"; then
               echo "::error::$symbol must be disabled in $BUILD_PROFILE profile"
               exit 1
-            }
+            fi
           }
 
           for symbol in \
@@ -249,12 +249,12 @@ jobs:
             CONFIG_BPF_LSM CONFIG_DEBUG_INFO_BTF; do
             require_y "$symbol"
           done
-          require_n CONFIG_FUNCTION_TRACER
+          require_disabled CONFIG_FUNCTION_TRACER
 
           case "$BUILD_PROFILE" in
             plain)
-              require_n CONFIG_PID_NS
-              require_n CONFIG_KVM
+              require_disabled CONFIG_PID_NS
+              require_disabled CONFIG_KVM
               ;;
             containers)
               for symbol in \
@@ -264,9 +264,9 @@ jobs:
                 CONFIG_BRIDGE_NETFILTER CONFIG_VETH CONFIG_KVM CONFIG_VHOST_NET; do
                 require_y "$symbol"
               done
-              require_n CONFIG_USER_NS
-              require_n CONFIG_FAIR_GROUP_SCHED
-              require_n CONFIG_RT_GROUP_SCHED
+              require_disabled CONFIG_USER_NS
+              require_disabled CONFIG_FAIR_GROUP_SCHED
+              require_disabled CONFIG_RT_GROUP_SCHED
               ;;
           esac
 
