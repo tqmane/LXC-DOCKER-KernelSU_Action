@@ -1,0 +1,237 @@
+name: Build OnePlus 9 Pro Android 17 BPF kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: Kernel branch, tag, or commit
+        required: true
+        default: oneplus/sm8350v_17.0.0_oneplus9pro_sukisu
+        type: string
+  push:
+    branches:
+      - ci/a17-bpf-plain-build
+    paths:
+      - ".github/workflows/a17-bpf-kernel.yml"
+      - "README_A17_BPF.md"
+  pull_request:
+    paths:
+      - ".github/workflows/a17-bpf-kernel.yml"
+      - "README_A17_BPF.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a17-bpf-plain-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: OnePlus 9 Pro / A17 BPF / plain
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    env:
+      MANIFEST_REPO: https://github.com/tqmane/android_kernel_manifest.git
+      MANIFEST_BRANCH: oneplus/sm8350v_15.0.0_oneplus9pro
+      KERNEL_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.kernel_ref || 'fix/a17-bpf-task-storage-hardening' }}
+      BUILD_CONFIG: kernel/msm-5.4/build.config.lemonade
+      VARIANT: qgki
+      LTO: thin
+      BUILD_KERNEL: "1"
+      KERNEL_IMAGE_NAME: Image
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+
+    steps:
+      - name: Checkout action repository
+        uses: actions/checkout@v4
+
+      - name: Free build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+
+      - name: Install build dependencies and repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc binutils-aarch64-linux-gnu bison build-essential ccache curl \
+            device-tree-compiler flex git libelf-dev liblz4-tool libncurses-dev \
+            libssl-dev lz4 python3 rsync unzip zip zstd
+
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo \
+            -o "$HOME/bin/repo"
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Configure private repository authentication
+        shell: bash
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PRIVATE_REPO_TOKEN:-}" ]]; then
+            echo "::error::PRIVATE_REPO_TOKEN is required to read the private kernel and SukiSU repositories."
+            exit 1
+          fi
+
+          git config --global credential.helper store
+          printf 'https://x-access-token:%s@github.com\n' "$PRIVATE_REPO_TOKEN" \
+            > "$HOME/.git-credentials"
+          chmod 600 "$HOME/.git-credentials"
+
+      - name: Sync manifest and select kernel ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/kernel_workspace"
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          repo init -u "$MANIFEST_REPO" -b "$MANIFEST_BRANCH"
+          repo sync --force-sync --no-clone-bundle --current-branch --no-tags \
+            -j"$(nproc --all)"
+
+          test -d kernel/msm-5.4
+          test -d modules_devicetree
+          test -d ak3
+
+          git -C kernel/msm-5.4 fetch --depth=1 origin "$KERNEL_REF"
+          git -C kernel/msm-5.4 checkout --detach FETCH_HEAD
+          git -C kernel/msm-5.4 submodule sync --recursive
+          git -C kernel/msm-5.4 submodule update --init --recursive --depth=1
+
+          echo "Kernel ref: $KERNEL_REF"
+          echo "Kernel commit: $(git -C kernel/msm-5.4 rev-parse HEAD)"
+          echo "BUILD_TIME=$(TZ=Asia/Tokyo date '+%Y%m%d-%H%M')" >> "$GITHUB_ENV"
+
+      - name: Configure ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: oneplus9pro-a17-bpf-plain
+          max-size: 2G
+
+      - name: Build unmodified A17 BPF kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          test -f "$BUILD_CONFIG"
+          BUILD_CONFIG="$BUILD_CONFIG" \
+          VARIANT="$VARIANT" \
+          LTO="$LTO" \
+          BUILD_KERNEL="$BUILD_KERNEL" \
+            build/build.sh
+
+      - name: Verify final BPF configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          FINAL_CONFIG="$(find out -type f -name .config -path '*msm-5.4*' -print -quit)"
+          if [[ -z "$FINAL_CONFIG" ]]; then
+            FINAL_CONFIG="$(find out -type f -name .config -print -quit)"
+          fi
+          test -n "$FINAL_CONFIG"
+
+          grep -qx 'CONFIG_BPF=y' "$FINAL_CONFIG"
+          grep -qx 'CONFIG_BPF_SYSCALL=y' "$FINAL_CONFIG"
+          grep -qx 'CONFIG_BPF_LSM=y' "$FINAL_CONFIG"
+          grep -qx 'CONFIG_DEBUG_INFO_BTF=y' "$FINAL_CONFIG"
+          if grep -qx 'CONFIG_FUNCTION_TRACER=y' "$FINAL_CONFIG"; then
+            echo "::error::Production A17 BPF profile must keep FUNCTION_TRACER disabled."
+            exit 1
+          fi
+
+          cp "$FINAL_CONFIG" "$GITHUB_WORKSPACE/final-kernel.config"
+          grep -E 'CONFIG_(BPF|BTF|DEBUG_INFO_BTF|FUNCTION_TRACER|DYNAMIC_FTRACE|LSM)' \
+            "$FINAL_CONFIG" || true
+
+      - name: Collect dist and AnyKernel3 artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          mkdir -p artifacts
+
+          DIST_DIR="$(find out -type d -name dist -print -quit 2>/dev/null || true)"
+          if [[ -z "$DIST_DIR" || ! -d "$DIST_DIR" ]]; then
+            echo "::error::Kernel build completed without a dist directory"
+            exit 1
+          fi
+
+          find_output() {
+            local name="$1"
+            local found
+            found="$(find "$DIST_DIR" -maxdepth 1 -type f -name "$name" -print -quit 2>/dev/null || true)"
+            if [[ -z "$found" ]]; then
+              found="$(find out -type f -name "$name" -print -quit 2>/dev/null || true)"
+            fi
+            printf '%s' "$found"
+          }
+
+          IMAGE_PATH="$(find_output "$KERNEL_IMAGE_NAME")"
+          test -n "$IMAGE_PATH"
+          test -f "$IMAGE_PATH"
+
+          cp -a "$DIST_DIR" artifacts/dist
+          cp "$GITHUB_WORKSPACE/final-kernel.config" artifacts/dist/final-kernel.config
+          cp "$IMAGE_PATH" "ak3/$KERNEL_IMAGE_NAME"
+
+          DTB_LAHAINA="$(find_output lahaina.dtb)"
+          DTB_V2="$(find_output lahaina-v2.dtb)"
+          DTB_V21="$(find_output lahaina-v2.1.dtb)"
+          if [[ -z "$DTB_LAHAINA" || -z "$DTB_V2" || -z "$DTB_V21" ]]; then
+            echo "::error::One or more required DTBs were not found"
+            find "$DIST_DIR" -maxdepth 1 -type f -name '*.dtb' -printf '%f\n' | sort || true
+            exit 1
+          fi
+          cat "$DTB_LAHAINA" "$DTB_V2" "$DTB_V21" > ak3/dtb
+          cp ak3/dtb artifacts/dist/dtb
+
+          DTBO_PATH="$(find_output dtbo.img)"
+          test -n "$DTBO_PATH"
+          test -f "$DTBO_PATH"
+          cp "$DTBO_PATH" ak3/dtbo.img
+          cp "$DTBO_PATH" artifacts/dist/dtbo.img
+
+          (
+            cd ak3
+            zip -r9 "../artifacts/AnyKernel3-OnePlus9Pro-A17-BPF-plain-${BUILD_TIME}.zip" . \
+              -x '.git/*' '.github/*' 'README.md'
+          )
+
+          sha256sum \
+            "$IMAGE_PATH" \
+            ak3/dtb \
+            ak3/dtbo.img \
+            artifacts/AnyKernel3-*.zip \
+            > artifacts/SHA256SUMS
+
+      - name: Upload plain kernel dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnePlus9Pro-A17-BPF-plain-dist-${{ env.BUILD_TIME }}
+          path: kernel_workspace/artifacts/dist
+          if-no-files-found: error
+
+      - name: Upload plain AnyKernel3
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3-OnePlus9Pro-A17-BPF-plain-${{ env.BUILD_TIME }}
+          path: |
+            kernel_workspace/artifacts/AnyKernel3-OnePlus9Pro-A17-BPF-plain-${{ env.BUILD_TIME }}.zip
+            kernel_workspace/artifacts/SHA256SUMS
+          if-no-files-found: error
