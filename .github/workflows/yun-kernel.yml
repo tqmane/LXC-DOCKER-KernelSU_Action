@@ -151,16 +151,27 @@ jobs:
           test -d modules_devicetree
           test -d ak3
 
+          # repo names remotes after the manifest's <remote> entry ("tqmane")
+          # rather than always creating "origin". Discover it instead of
+          # assuming a conventional clone layout.
+          mapfile -t kernel_remotes < <(git -C kernel/msm-5.4 remote)
+          kernel_remote="${kernel_remotes[0]:-}"
+          if [[ -z "$kernel_remote" ]]; then
+            echo "::error::The manifest kernel checkout has no Git remote"
+            exit 1
+          fi
+
           # The manifest supplies all dependencies. Select only the requested
           # kernel profile after sync; no Action-side source patching or KSU
           # installation is performed.
-          git -C kernel/msm-5.4 fetch origin "$KERNEL_REF" --depth=1
+          git -C kernel/msm-5.4 fetch "$kernel_remote" "$KERNEL_REF" --depth=1
           git -C kernel/msm-5.4 checkout --detach FETCH_HEAD
           git -C kernel/msm-5.4 submodule sync --recursive
           git -C kernel/msm-5.4 submodule update --init --recursive --depth=1
 
           echo "Kernel source: $(git -C kernel/msm-5.4 rev-parse HEAD)"
           echo "Kernel branch requested: $KERNEL_REF"
+          echo "Kernel remote used: $kernel_remote"
 
           if [[ ! -f "$ACTIVE_BUILD_CONFIG" ]]; then
             echo "::error::BUILD_CONFIG does not exist: $ACTIVE_BUILD_CONFIG"
