@@ -1,71 +1,77 @@
-# OnePlus 9 Pro LXC + Docker Kernel Action
+# OnePlus 9 Pro Android 17 BPF Kernel Action
 
-このActionは、指定されたOnePlus 9 Pro用manifestをそのまま同期してビルドしつつ、Action側に元々あったKernelSU導入処理を削除し、LXC / Docker向け設定とパッチだけを追加する構成です。
+OnePlus 9 Pro（SM8350 / GKI 1.0）のAndroid 17向けBPF 5.15部分バックポートを、manifest経由で再現ビルドするGitHub Actionsです。
+
+このリポジトリはカーネルへKernelSUを追加しません。manifestが参照するprivate kernelに既に含まれているSukiSUとsubmoduleを、そのまま同期してビルドします。
 
 ## ビルド元
 
-manifest:
+- manifest: `tqmane/android_kernel_manifest`
+- manifest branch: `oneplus/sm8350v_15.0.0_oneplus9pro`
+- default kernel ref: `oneplus/sm8350v_17.0.0_oneplus9pro_sukisu`
+- build config: `kernel/msm-5.4/build.config.lemonade`
+- variant: `qgki`
+- LTO: `thin`
 
-- `tqmane/android_kernel_manifest`
-- branch: `oneplus/sm8350v_15.0.0_oneplus9pro`
+manifest branch名には15.0.0が残っていますが、`default.xml`のkernel projectはAndroid 17 BPFブランチを参照しています。Workflowの`kernel_ref`入力を使うと、同じmanifest/vendor構成のまま任意のbranch、tag、commitを試せます。
 
-ビルドは単一kernel repositoryを直接`make`する方式ではなく、manifestを`repo init` / `repo sync`した後、Android kernel build frameworkを使います。
+## ビルドプロファイル
 
-```bash
-BUILD_CONFIG=kernel/msm-5.4/build.config.lemonade \
-VARIANT=qgki \
-LTO=thin \
-BUILD_KERNEL=1 \
-build/build.sh
-```
+GitHub Actionsの`Build OnePlus 9 Pro Android 17 BPF kernel`から、次のどちらかを選びます。
 
-> manifestのREADMEには`build.config.msm.lemonade`とありますが、実際のOnePlus 9/9 Pro kernel treeに存在するファイルは`build.config.lemonade`です。
+### `plain`
 
-## KernelSU / SukiSUについて
+- repo sync後のQGKI configを変更しません。
+- Docker、LXC、KVM用configやsource patchを追加しません。
+- Android 17 BPF、SukiSU、SuSFSなど、kernel branchに元からある内容だけをビルドします。
 
-このAction自身はKernelSUをcloneしたり、`setup.sh`を実行したり、KSU用configを追加したりしません。
+### `containers`
 
-ただし、指定manifest自体は現在private kernel branchとKernelSU/SukiSU submoduleを参照しています。そのため、**manifestに元から含まれているKernelSU/SukiSUはそのまま同期されます**。Action側から二重に導入・上書きする処理だけを削除しています。
+plainと同じAndroid 17 BPF sourceに対し、ビルド時だけ次を追加します。
+
+- LXC用namespace、cgroup v1、checkpoint/restore、SysV IPC
+- Docker用bridge、NAT、veth、macvlan/ipvlan/vxlan、OverlayFS
+- seccomp、pidfd/diagnosticに必要な周辺config
+- arm64 KVM、vhost-net
+- rootful container向けに`CONFIG_ANDROID_PARANOID_NETWORK`を無効化
+- cgroup v1のNOPREFIX互換alias patch
+
+vendor WALT schedulerは維持し、`FAIR_GROUP_SCHED`、`RT_GROUP_SCHED`、`SCHED_AUTOGROUP`を強制しません。AUFSとBtrfsも追加しません。
+
+`miaizhe/Kernel_oplus_sm8350_9RT`のDocker workflowは要件調査の参考にしましたが、別端末の`util.c`、`module.c`、`user.h`をdownloadして丸ごと置換する処理は採用していません。OnePlus 9 ProのsourceとKMIを維持したまま、監査可能なconfig追加と小さなcgroup patchだけを使います。
+
+KVMのkernel supportは有効になりますが、実機での利用可否はEL2、bootloader/firmware、Android userspace側のQEMU構成にも依存します。
+
+## 安全性チェック
+
+ビルド後の最終`.config`を検証し、次を満たさなければWorkflowを失敗させます。
+
+- BPF syscall、JIT、BPF LSM、BTF、CFI、Shadow Call Stackが有効
+- `CONFIG_LSM`に`bpf`が存在
+- 起動確認されていないarm64 direct trampoline経路を避けるため、`CONFIG_FUNCTION_TRACER`は無効
+- `containers`ではnamespace、cgroup、seccomp、veth、OverlayFS、KVM、vhost-netが有効
 
 ## Private repository認証
 
-manifestからprivate repositoryとprivate submoduleを同期するため、repositoryのActions secretに次を登録してください。
-
-- Secret name: `PRIVATE_REPO_TOKEN`
-- Value: manifestから参照されるprivate repositoryをreadできるfine-grained PAT
-
-現状では少なくとも以下へのread権限が必要です。
+Actions secret `GH_PAT`を登録してください。fine-grained PATには少なくとも次のprivate repositoryへのread権限が必要です。
 
 - `tqmane/android_kernel_oppo_sm8350-private`
-- `tqmane/SukiSU-Ultra-private`
+- manifest/kernelが参照するprivate SukiSU repository
 
-PATはworkflowやmanifestへ直接書き込みません。Git credential helper経由で`repo sync`にだけ使用します。
-
-## LXC / Docker
-
-`config.env`のデフォルトは以下です。
-
-```ini
-LXC_DOCKER=true
-LXC_PATCH=true
-ANDROID_PARANOID_NETWORK_OFF=true
-```
-
-LXC / Docker用configはLahaina QGKI fragmentへ追加され、その後`build/build.sh`が最終defconfigを生成します。cgroup runtime patchと`xt_qtaguid` patchも維持しています。
-
-KVMは必要な場合だけ有効化できます。
-
-```ini
-ENABLE_KVM=false
-```
+Tokenはmanifestやartifactへ書き込みません。repo syncとsubmodule syncのcredentialとしてだけ使用します。
 
 ## 実行方法
 
-GitHub Actionsから `Build OnePlus 9 Pro LXC/Docker kernel` を選び、`Run workflow`を実行してください。
+1. Actionsから`Build OnePlus 9 Pro Android 17 BPF kernel`を開きます。
+2. `Run workflow`を押します。
+3. `profile`で`plain`または`containers`を選びます。
+4. 必要なら`kernel_ref`をPR branchやcommit SHAへ変更します。
 
-ビルド後は以下をartifactとしてアップロードします。
+## 成果物
 
-- Android kernel build frameworkの`dist`出力
-- manifestに含まれる`ak3`を使ったOnePlus 9 Pro用AnyKernel3 ZIP
+- Android kernel build frameworkの`dist`
+- 最終`kernel.config`
+- kernel、manifest、modules、profileを記録した`build-info.txt`
+- OnePlus 9 Pro用AnyKernel3 ZIP（Image、連結DTB、dtbo.img）
 
-主要な設定はルートの`config.env`にまとめています。
+成果物名には`plain`または`containers`が含まれるため、取り違えを防げます。
