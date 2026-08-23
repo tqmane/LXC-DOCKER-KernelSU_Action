@@ -32,6 +32,18 @@ jobs:
       REQUESTED_KERNEL_REF: ${{ inputs.kernel_ref }}
 
     steps:
+      # maximize-build-space mounts a new filesystem over GITHUB_WORKSPACE.
+      # It must run before checkout or the checked-out scripts disappear.
+      - name: Free build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
       - name: Checkout action repository
         uses: actions/checkout@v4
 
@@ -39,6 +51,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -f "$GITHUB_WORKSPACE/config.env"
+          test -f "$GITHUB_WORKSPACE/scripts/configure-build-profile.sh"
+          test -f "$GITHUB_WORKSPACE/scripts/validate-kernel-config.sh"
+
           set -a
           source "$GITHUB_WORKSPACE/config.env"
           set +a
@@ -69,16 +85,6 @@ jobs:
 
           echo "Build profile: $BUILD_PROFILE"
           echo "Kernel ref: $kernel_ref"
-
-      - name: Free build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 8192
-          temp-reserve-mb: 2048
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
 
       - name: Install build dependencies and repo
         shell: bash
@@ -320,13 +326,13 @@ jobs:
       - name: Upload kernel dist
         uses: actions/upload-artifact@v4
         with:
-          name: OnePlus9Pro-A17-BPF-${{ inputs.profile }}-dist-${{ env.BUILD_TIME }}
+          name: OnePlus9Pro-A17-BPF-${{ inputs.profile }}-dist-run-${{ github.run_number }}
           path: kernel_workspace/artifacts/dist
           if-no-files-found: error
 
       - name: Upload AnyKernel3
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3-OnePlus9Pro-A17-BPF-${{ inputs.profile }}-${{ env.BUILD_TIME }}
-          path: kernel_workspace/artifacts/AnyKernel3-OnePlus9Pro-A17-BPF-${{ inputs.profile }}-${{ env.BUILD_TIME }}.zip
+          name: AnyKernel3-OnePlus9Pro-A17-BPF-${{ inputs.profile }}-run-${{ github.run_number }}
+          path: kernel_workspace/artifacts/AnyKernel3-OnePlus9Pro-A17-BPF-${{ inputs.profile }}-*.zip
           if-no-files-found: error
