@@ -173,8 +173,8 @@ jobs:
           fi
 
           # The manifest supplies all dependencies. Select only the requested
-          # kernel profile after sync; no Action-side source patching or KSU
-          # installation is performed.
+          # kernel profile after sync; no external source patch or KSU setup is
+          # downloaded or injected by this Action.
           git -C kernel/msm-5.4 fetch "$kernel_remote" "$KERNEL_REF" --depth=1
           git -C kernel/msm-5.4 checkout --detach FETCH_HEAD
 
@@ -184,10 +184,50 @@ jobs:
             exit 1
           fi
 
+          # Enabling SYSVIPC/POSIX_MQUEUE changes legacy structure layouts.
+          # The container branch owns a reviewed KABI patch that relocates the
+          # new state into unused Android reserve slots. Apply it locally and
+          # make a deterministic commit so setlocalversion/vermagic never gain
+          # a '-dirty' suffix. Plain builds do not touch kernel source.
+          if [[ "$BUILD_PROFILE" == "containers" ]]; then
+            patch_file="patches/container-kabi.patch"
+            if [[ ! -f "kernel/msm-5.4/$patch_file" ]]; then
+              echo "::error::Missing container KABI patch: $patch_file"
+              exit 1
+            fi
+
+            if git -C kernel/msm-5.4 apply --reverse --check "$patch_file" \
+                >/dev/null 2>&1; then
+              echo "Container KABI adaptation is already present"
+            else
+              git -C kernel/msm-5.4 apply --check "$patch_file"
+              git -C kernel/msm-5.4 apply "$patch_file"
+              git -C kernel/msm-5.4 diff --check
+              git -C kernel/msm-5.4 config user.name github-actions[bot]
+              git -C kernel/msm-5.4 config user.email \
+                41898282+github-actions[bot]@users.noreply.github.com
+              git -C kernel/msm-5.4 add \
+                include/linux/sched.h include/linux/sched/user.h
+              GIT_AUTHOR_DATE=2000-01-01T00:00:00Z \
+              GIT_COMMITTER_DATE=2000-01-01T00:00:00Z \
+                git -C kernel/msm-5.4 commit --no-gpg-sign \
+                  -m "ANDROID: kabi: preserve container task and user layouts"
+            fi
+
+            grep -q 'ANDROID_KABI_USE(3, struct sysv_sem sysvsem)' \
+              kernel/msm-5.4/include/linux/sched.h
+            grep -q 'ANDROID_KABI_USE(1, unsigned long mq_bytes)' \
+              kernel/msm-5.4/include/linux/sched/user.h
+          fi
+
           git -C kernel/msm-5.4 submodule sync --recursive
           git -C kernel/msm-5.4 submodule update --init --recursive --depth=1
 
-          echo "Kernel source: $actual_sha"
+          effective_sha="$(git -C kernel/msm-5.4 rev-parse HEAD)"
+          test -z "$(git -C kernel/msm-5.4 status --porcelain)"
+          echo "KERNEL_EFFECTIVE_SHA=$effective_sha" >> "$GITHUB_ENV"
+          echo "Kernel source branch head: $actual_sha"
+          echo "Kernel effective build commit: $effective_sha"
           echo "Kernel branch requested: $KERNEL_REF"
           echo "Kernel remote used: $kernel_remote"
 
@@ -307,6 +347,8 @@ jobs:
           cp -a "$dist_dir" artifacts/dist
           cp "$GITHUB_WORKSPACE/effective-${BUILD_PROFILE}.config" \
             artifacts/dist/effective.config
+          printf '%s\n' "$KERNEL_EFFECTIVE_SHA" > \
+            artifacts/dist/kernel-effective-sha.txt
           cp "$image_path" "ak3/$KERNEL_IMAGE_NAME"
 
           dtb_lahaina="$(find_output lahaina.dtb)"
