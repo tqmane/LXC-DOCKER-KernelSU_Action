@@ -50,7 +50,7 @@ The dedicated kernel branch applies `lahaina_CONTAINER.config` after the normal 
 
 The OPlus WALT scheduler model is retained, so `FAIR_GROUP_SCHED` and `RT_GROUP_SCHED` remain disabled. `USER_NS` also remains disabled.
 
-### GKI 1.0 KABI adaptation
+### GKI 1.0 KABI adaptation and stock-module compatibility
 
 Enabling `SYSVIPC` and `POSIX_MQUEUE` directly can move established fields in `task_struct` and `user_struct`, potentially breaking the KMI or symbol CRCs expected by stock vendor modules. The container branch therefore runs `scripts/gki/apply_container_kabi.py` and relocates the new state into unused Android KABI slots:
 
@@ -58,7 +58,7 @@ Enabling `SYSVIPC` and `POSIX_MQUEUE` directly can move established fields in `t
 - `struct sysv_shm` → `task_struct` slots 4 and 5;
 - `mq_bytes` → `user_struct` slot 1.
 
-The Action records the adaptation in a deterministic local commit before building, preventing a `-dirty` suffix in the kernel release or module vermagic. The effective build commit SHA is included in the artifacts.
+The Action records the adaptation in a deterministic local commit before building, preventing a `-dirty` suffix in the kernel release. Because the AnyKernel3 package replaces the Image but not stock vendor modules, the container branch also pins `.scmversion` to the plain hardening head suffix. CI accepts this compatibility release only when every matching plain/container `.ko` has identical vermagic and modversion CRC requirements. The effective build commit SHA and the KMI report are included in the artifacts.
 
 The unrelated Reno10 `module.c`, OverlayFS implementation, wholesale `user.h` replacement, and external runtime patches used by the referenced 9RT workflow are deliberately not copied. Only the dedicated SM8350 config and a minimal, reviewable KABI adaptation are used.
 
@@ -84,7 +84,7 @@ At minimum, access is required for:
 
 Open `Build OnePlus 9 Pro Android 17 BPF kernel` in GitHub Actions and select either `plain` or `containers` in `Run workflow`.
 
-Pull requests automatically build and validate both profiles.
+Pull requests automatically build both profiles, validate the effective configurations, and compare stock-module compatibility.
 
 ## Artifacts
 
@@ -93,7 +93,8 @@ Each profile uploads:
 - the Android kernel build framework `dist` directory;
 - the effective kernel `.config`;
 - the exact effective kernel commit SHA;
-- a flashable AnyKernel3 ZIP from the manifest-provided `ak3` tree.
+- a flashable AnyKernel3 ZIP from the manifest-provided `ak3` tree;
+- a plain/container module vermagic and modversion CRC comparison report.
 
 DTBs are concatenated in the order used by the boot-tested OnePlus 9 Pro package:
 
@@ -101,4 +102,4 @@ DTBs are concatenated in the order used by the boot-tested OnePlus 9 Pro package
 lahaina.dtb -> lahaina-v2.1.dtb -> lahaina-v2.dtb
 ```
 
-References and build configs are managed in `config.env`. The container profile is compile-tested by CI, but device runtime validation should still cover cold boot and Docker, LXC, and KVM separately with a known rollback path available. KVM runtime also depends on the device firmware and hypervisor exposing usable EL2 support.
+References and build configs are managed in `config.env`. The container profile is compile-tested and checked against the stock module KMI by CI, but device runtime validation should still cover cold boot and Docker, LXC, and KVM separately with a known rollback path available. KVM runtime also depends on the device firmware and hypervisor exposing usable EL2 support.
