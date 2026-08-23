@@ -41,10 +41,10 @@ case "$profile" in
     ;;
 esac
 
-# Android-safe LXC/Docker baseline.  Deliberately do not enable
+# Android-safe LXC/Docker baseline. Deliberately do not enable
 # FAIR_GROUP_SCHED, RT_GROUP_SCHED or SCHED_AUTOGROUP and do not disable WALT:
-# those scheduler changes are not required for containers and previously made
-# this vendor kernel unstable.
+# those scheduler changes are not required for basic containers and previously
+# made this vendor kernel unstable.
 container_symbols=(
   CONFIG_NAMESPACES
   CONFIG_UTS_NS
@@ -90,6 +90,8 @@ container_symbols=(
   CONFIG_NETFILTER_XT_MATCH_ADDRTYPE
   CONFIG_NETFILTER_XT_MATCH_CONNTRACK
   CONFIG_NETFILTER_XT_MATCH_BPF
+  CONFIG_NETFILTER_XT_MATCH_MULTIPORT
+  CONFIG_NETFILTER_XT_TARGET_CHECKSUM
   CONFIG_IP_NF_IPTABLES
   CONFIG_IP_NF_FILTER
   CONFIG_IP_NF_NAT
@@ -100,16 +102,17 @@ container_symbols=(
   CONFIG_IP6_NF_TARGET_MASQUERADE
   CONFIG_BRIDGE
   CONFIG_BRIDGE_NETFILTER
+  CONFIG_BRIDGE_VLAN_FILTERING
   CONFIG_VETH
   CONFIG_TUN
-  CONFIG_TAP
+  CONFIG_DUMMY
   CONFIG_MACVLAN
   CONFIG_IPVLAN
   CONFIG_VXLAN
+  CONFIG_NET_L3_MASTER_DEV
   CONFIG_OVERLAY_FS
   CONFIG_VIRTUALIZATION
   CONFIG_KVM
-  CONFIG_VHOST
   CONFIG_VHOST_NET
 )
 
@@ -120,7 +123,7 @@ done
 # Rootful containers create sockets outside Android's AID group model.
 set_n CONFIG_ANDROID_PARANOID_NETWORK
 
-# OverlayFS is the supported Docker storage driver for this profile.  Avoid
+# OverlayFS is the supported Docker storage driver for this profile. Avoid
 # forcing large optional filesystems that have caused build/boot regressions.
 set_n CONFIG_AUFS_FS
 set_n CONFIG_BTRFS_FS
