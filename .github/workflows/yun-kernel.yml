@@ -51,7 +51,9 @@ jobs:
           profile="${profile:-plain}"
 
           for key in \
-            MANIFEST_REPO MANIFEST_BRANCH PLAIN_KERNEL_REF CONTAINER_KERNEL_REF \
+            MANIFEST_REPO MANIFEST_BRANCH \
+            PLAIN_KERNEL_REF PLAIN_KERNEL_EXPECTED_SHA \
+            CONTAINER_KERNEL_REF CONTAINER_KERNEL_EXPECTED_SHA \
             PLAIN_BUILD_CONFIG CONTAINER_BUILD_CONFIG VARIANT LTO BUILD_KERNEL \
             KERNEL_IMAGE_NAME ENABLE_CCACHE; do
             value="${!key:-}"
@@ -64,10 +66,12 @@ jobs:
           case "$profile" in
             plain)
               kernel_ref="$PLAIN_KERNEL_REF"
+              kernel_expected_sha="$PLAIN_KERNEL_EXPECTED_SHA"
               active_build_config="$PLAIN_BUILD_CONFIG"
               ;;
             containers)
               kernel_ref="$CONTAINER_KERNEL_REF"
+              kernel_expected_sha="$CONTAINER_KERNEL_EXPECTED_SHA"
               active_build_config="$CONTAINER_BUILD_CONFIG"
               ;;
             *)
@@ -76,10 +80,16 @@ jobs:
               ;;
           esac
 
+          if [[ ! "$kernel_expected_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid expected kernel SHA: $kernel_expected_sha"
+            exit 1
+          fi
+
           {
             echo "MANIFEST_REPO=$MANIFEST_REPO"
             echo "MANIFEST_BRANCH=$MANIFEST_BRANCH"
             echo "KERNEL_REF=$kernel_ref"
+            echo "KERNEL_EXPECTED_SHA=$kernel_expected_sha"
             echo "ACTIVE_BUILD_CONFIG=$active_build_config"
             echo "VARIANT=$VARIANT"
             echo "LTO=$LTO"
@@ -92,6 +102,7 @@ jobs:
 
           echo "Selected profile: $profile"
           echo "Kernel ref: $kernel_ref"
+          echo "Expected kernel SHA: $kernel_expected_sha"
           echo "Build config: $active_build_config"
 
       - name: Free build space
@@ -166,10 +177,17 @@ jobs:
           # installation is performed.
           git -C kernel/msm-5.4 fetch "$kernel_remote" "$KERNEL_REF" --depth=1
           git -C kernel/msm-5.4 checkout --detach FETCH_HEAD
+
+          actual_sha="$(git -C kernel/msm-5.4 rev-parse HEAD)"
+          if [[ "$actual_sha" != "$KERNEL_EXPECTED_SHA" ]]; then
+            echo "::error::Kernel branch moved: expected $KERNEL_EXPECTED_SHA, got $actual_sha"
+            exit 1
+          fi
+
           git -C kernel/msm-5.4 submodule sync --recursive
           git -C kernel/msm-5.4 submodule update --init --recursive --depth=1
 
-          echo "Kernel source: $(git -C kernel/msm-5.4 rev-parse HEAD)"
+          echo "Kernel source: $actual_sha"
           echo "Kernel branch requested: $KERNEL_REF"
           echo "Kernel remote used: $kernel_remote"
 
