@@ -25,13 +25,28 @@ on:
       - patch/**
 
 jobs:
-  build-kernel:
+  build-selected-profile:
+    if: github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/yun-kernel.yml
     with:
-      profile: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'plain' }}
-      # While this PR is under review, build the corresponding kernel hardening
-      # branch. This fallback is switched to the production branch after both
-      # PRs have passed CI.
-      kernel_ref: ${{ github.event_name == 'workflow_dispatch' && inputs.kernel_ref || 'fix/android17-bpf-task-storage-recursion' }}
+      profile: ${{ inputs.profile }}
+      kernel_ref: ${{ inputs.kernel_ref }}
+    secrets:
+      PRIVATE_REPO_TOKEN: ${{ secrets.GH_PAT }}
+
+  validate-pull-request:
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - plain
+          - containers
+    uses: ./.github/workflows/yun-kernel.yml
+    with:
+      profile: ${{ matrix.profile }}
+      # Test both Action profiles against the related kernel hardening PR.
+      # This is changed back to the production ref before merge.
+      kernel_ref: fix/android17-bpf-task-storage-recursion
     secrets:
       PRIVATE_REPO_TOKEN: ${{ secrets.GH_PAT }}
