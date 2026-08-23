@@ -1,10 +1,37 @@
-name: Build OnePlus 9 Pro LXC/Docker kernel
+name: Build OnePlus 9 Pro Android 17 BPF kernel
 
 on:
   workflow_dispatch:
+    inputs:
+      profile:
+        description: Kernel feature profile
+        required: true
+        default: plain
+        type: choice
+        options:
+          - plain
+          - containers
+      kernel_ref:
+        description: Branch, tag, or commit in tqmane/android_kernel_oppo_sm8350-private
+        required: true
+        default: oneplus/sm8350v_17.0.0_oneplus9pro_sukisu
+        type: string
+  pull_request:
+    paths:
+      - .github/workflows/blank.yml
+      - .github/workflows/yun-kernel.yml
+      - config.env
+      - scripts/**
+      - patch/**
 
 jobs:
   build-kernel:
     uses: ./.github/workflows/yun-kernel.yml
+    with:
+      profile: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'plain' }}
+      # While this PR is under review, build the corresponding kernel hardening
+      # branch. This fallback is switched to the production branch after both
+      # PRs have passed CI.
+      kernel_ref: ${{ github.event_name == 'workflow_dispatch' && inputs.kernel_ref || 'fix/android17-bpf-task-storage-recursion' }}
     secrets:
       PRIVATE_REPO_TOKEN: ${{ secrets.GH_PAT }}
