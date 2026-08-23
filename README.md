@@ -9,8 +9,8 @@ OnePlus 9 Pro向けLinux 5.4.254カーネルを、Android kernel build framework
 
 - manifest: `tqmane/android_kernel_manifest`
 - manifest branch: `ci/a17-bpf-runtime-hardening`
-- plain kernel: `fix/android17-bpf-task-storage-recursion`
-- container kernel: `oneplus/sm8350v_17.0.0_oneplus9pro_sukisu_lxc_docker_kvm`
+- plain kernel: `fix/a17-bpf-task-storage-hardening`
+- container kernel: `oneplus/sm8350v_17.0.0_oneplus9pro_sukisu_lxc_docker_kvm_v2`
 
 共通ビルド条件は次のとおりです。
 
