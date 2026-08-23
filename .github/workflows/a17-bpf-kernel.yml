@@ -3,6 +3,14 @@ name: Build OnePlus 9 Pro Android 17 BPF kernel
 on:
   workflow_dispatch:
     inputs:
+      profile:
+        description: Build profile
+        required: true
+        default: plain
+        type: choice
+        options:
+          - plain
+          - containers
       kernel_ref:
         description: Kernel branch, tag, or commit
         required: true
@@ -11,24 +19,27 @@ on:
   push:
     branches:
       - ci/a17-bpf-plain-build
+      - ci/a17-bpf-container-profile
     paths:
       - ".github/workflows/a17-bpf-kernel.yml"
       - "README_A17_BPF.md"
+      - "scripts/configure-a17-profile.sh"
   pull_request:
     paths:
       - ".github/workflows/a17-bpf-kernel.yml"
       - "README_A17_BPF.md"
+      - "scripts/configure-a17-profile.sh"
 
 permissions:
   contents: read
 
 concurrency:
-  group: a17-bpf-plain-${{ github.workflow }}-${{ github.ref }}
+  group: a17-bpf-${{ github.workflow }}-${{ github.ref }}-${{ inputs.profile || 'ci' }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: OnePlus 9 Pro / A17 BPF / plain
+    name: OnePlus 9 Pro / A17 BPF / ${{ github.event_name == 'workflow_dispatch' && inputs.profile || ((github.head_ref == 'ci/a17-bpf-container-profile' || github.ref_name == 'ci/a17-bpf-container-profile') && 'containers' || 'plain') }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
@@ -36,6 +47,8 @@ jobs:
       MANIFEST_REPO: https://github.com/tqmane/android_kernel_manifest.git
       MANIFEST_BRANCH: oneplus/sm8350v_15.0.0_oneplus9pro
       KERNEL_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.kernel_ref || 'fix/a17-bpf-task-storage-hardening' }}
+      PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || ((github.head_ref == 'ci/a17-bpf-container-profile' || github.ref_name == 'ci/a17-bpf-container-profile') && 'containers' || 'plain') }}
+      CONFIG_FRAGMENT: kernel/msm-5.4/arch/arm64/configs/vendor/lahaina_QGKI.config
       BUILD_CONFIG: kernel/msm-5.4/build.config.lemonade
       VARIANT: qgki
       LTO: thin
@@ -113,15 +126,26 @@ jobs:
 
           echo "Kernel ref: $KERNEL_REF"
           echo "Kernel commit: $(git -C kernel/msm-5.4 rev-parse HEAD)"
+          echo "Build profile: $PROFILE"
           echo "BUILD_TIME=$(TZ=Asia/Tokyo date '+%Y%m%d-%H%M')" >> "$GITHUB_ENV"
 
       - name: Configure ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: oneplus9pro-a17-bpf-plain
+          key: oneplus9pro-a17-bpf-${{ env.PROFILE }}
           max-size: 2G
 
-      - name: Build unmodified A17 BPF kernel
+      - name: Apply selected build profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          bash "$GITHUB_WORKSPACE/scripts/configure-a17-profile.sh" \
+            "$PROFILE" \
+            "$GITHUB_WORKSPACE/kernel_workspace/kernel/msm-5.4" \
+            "$GITHUB_WORKSPACE/kernel_workspace/$CONFIG_FRAGMENT"
+
+      - name: Build Android 17 BPF kernel
         shell: bash
         run: |
           set -euo pipefail
@@ -153,6 +177,19 @@ jobs:
           if grep -qx 'CONFIG_FUNCTION_TRACER=y' "$FINAL_CONFIG"; then
             echo "::error::Production A17 BPF profile must keep FUNCTION_TRACER disabled."
             exit 1
+          fi
+
+          if [[ "$PROFILE" == "containers" ]]; then
+            for symbol in \
+              CONFIG_NAMESPACES CONFIG_UTS_NS CONFIG_IPC_NS CONFIG_PID_NS CONFIG_NET_NS \
+              CONFIG_CGROUPS CONFIG_CGROUP_DEVICE CONFIG_CGROUP_PIDS CONFIG_MEMCG \
+              CONFIG_SECCOMP_FILTER CONFIG_VETH CONFIG_BRIDGE CONFIG_OVERLAY_FS \
+              CONFIG_VIRTUALIZATION CONFIG_KVM CONFIG_VHOST_NET; do
+              if ! grep -qx "${symbol}=y" "$FINAL_CONFIG"; then
+                echo "::error::Containers profile did not enable ${symbol}"
+                exit 1
+              fi
+            done
           fi
 
           cp "$FINAL_CONFIG" "$GITHUB_WORKSPACE/final-kernel.config"
@@ -209,7 +246,7 @@ jobs:
 
           (
             cd ak3
-            zip -r9 "../artifacts/AnyKernel3-OnePlus9Pro-A17-BPF-plain-${BUILD_TIME}.zip" . \
+            zip -r9 "../artifacts/AnyKernel3-OnePlus9Pro-A17-BPF-${PROFILE}-${BUILD_TIME}.zip" . \
               -x '.git/*' '.github/*' 'README.md'
           )
 
@@ -220,18 +257,18 @@ jobs:
             artifacts/AnyKernel3-*.zip \
             > artifacts/SHA256SUMS
 
-      - name: Upload plain kernel dist
+      - name: Upload kernel dist
         uses: actions/upload-artifact@v4
         with:
-          name: OnePlus9Pro-A17-BPF-plain-dist-${{ env.BUILD_TIME }}
+          name: OnePlus9Pro-A17-BPF-${{ env.PROFILE }}-dist-${{ env.BUILD_TIME }}
           path: kernel_workspace/artifacts/dist
           if-no-files-found: error
 
-      - name: Upload plain AnyKernel3
+      - name: Upload AnyKernel3
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3-OnePlus9Pro-A17-BPF-plain-${{ env.BUILD_TIME }}
+          name: AnyKernel3-OnePlus9Pro-A17-BPF-${{ env.PROFILE }}-${{ env.BUILD_TIME }}
           path: |
-            kernel_workspace/artifacts/AnyKernel3-OnePlus9Pro-A17-BPF-plain-${{ env.BUILD_TIME }}.zip
+            kernel_workspace/artifacts/AnyKernel3-OnePlus9Pro-A17-BPF-${{ env.PROFILE }}-${{ env.BUILD_TIME }}.zip
             kernel_workspace/artifacts/SHA256SUMS
           if-no-files-found: error
