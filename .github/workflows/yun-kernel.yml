@@ -136,10 +136,23 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/kernel/msm-5.4"
 
-          git fetch --no-tags --depth=1 origin "$KERNEL_REF"
+          if git remote | grep -qx tqmane; then
+            kernel_remote=tqmane
+          elif git remote | grep -qx origin; then
+            kernel_remote=origin
+          else
+            kernel_remote="$(git remote | head -n1)"
+          fi
+          if [[ -z "$kernel_remote" ]]; then
+            echo "::error::Kernel checkout has no git remote"
+            exit 1
+          fi
+
+          echo "Fetching $KERNEL_REF from remote $kernel_remote"
+          git fetch --no-tags --depth=1 "$kernel_remote" "$KERNEL_REF"
           git checkout --detach FETCH_HEAD
           git submodule sync --recursive
-          git submodule update --init --recursive --depth 1
+          git submodule update --init --recursive
 
           kernel_sha="$(git rev-parse HEAD)"
           echo "KERNEL_SHA=$kernel_sha" >> "$GITHUB_ENV"
