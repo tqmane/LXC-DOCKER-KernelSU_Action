@@ -34,7 +34,7 @@ BUILD_CONFIG=kernel/msm-5.4/build.config.lemonade.container build/build.sh
 
 ## plainプロファイル
 
-起動確認済みのAndroid 17 BPF構成を保ちます。ActionはDocker、LXC、KVM向けconfigを追加せず、カーネルソースへパッチも適用しません。
+起動確認済みのAndroid 17 BPF構成を保ちます。ActionはDocker、LXC、KVM向けconfigを追加せず、追跡対象のカーネルソースも変更しません。
 
 ビルド後、少なくとも次を検証します。
 
@@ -59,13 +59,23 @@ BUILD_CONFIG=kernel/msm-5.4/build.config.lemonade.container build/build.sh
 
 OPlusのWALT schedulerを維持するため、`FAIR_GROUP_SCHED`と`RT_GROUP_SCHED`は有効化しません。`USER_NS`も無効のままです。
 
-9RT参考repoにあった別機種Reno10用`module.c`、OverlayFS実装、`user.h`のダウンロード置換や、外部runtime patchは使用していません。SM8350ツリーのsourceを保ち、専用configだけで構成します。
+### GKI 1.0 KABI適応
+
+`SYSVIPC`と`POSIX_MQUEUE`を単純に有効化すると、`task_struct`と`user_struct`の既存field位置が変わり、stock vendor moduleのKMI／CRCを壊す可能性があります。そのため、container branch内の`scripts/gki/apply_container_kabi.py`を実行し、追加stateを未使用のAndroid KABI slotへ移します。
+
+- `struct sysv_sem` → `task_struct` slot 3
+- `struct sysv_shm` → `task_struct` slots 4／5
+- `mq_bytes` → `user_struct` slot 1
+
+Actionは適応後の差分を固定日時のlocal commitにしてからビルドするため、kernel releaseやvermagicへ`-dirty`を付けません。成果物には実際にビルドしたcommit SHAも保存します。
+
+9RT参考repoにあった別機種Reno10用`module.c`、OverlayFS実装、`user.h`の丸ごと置換、外部runtime patchは使用していません。SM8350ツリー内の専用configと、レビュー可能な最小KABI適応だけを使用します。
 
 ## KernelSU／SukiSU
 
 このAction自身はKernelSUをcloneせず、`setup.sh`を実行せず、KSU configも注入しません。
 
-manifestが追跡するprivate kernelには既にSukiSU submoduleが含まれるため、それは通常のsource dependencyとして同期されます。Action側から二重導入や上書きは行いません。
+manifestが追跡するprivate kernelには既にSukiSU submoduleが含まれるため、それをsuperprojectの固定gitlinkへ同期します。Action側から二重導入や上書きは行いません。
 
 ## Private repository認証
 
@@ -96,6 +106,7 @@ Pull Requestでは両プロファイルが自動でビルドされ、最終`.con
 
 - Android kernel build frameworkの`dist`一式
 - 実際に使用した`effective.config`
+- 実際にビルドしたkernel commit SHA
 - manifestのAnyKernel3を使用したflashable ZIP
 
 DTBは、実機起動確認済みpackageに合わせて次の順で連結します。
@@ -104,4 +115,4 @@ DTBは、実機起動確認済みpackageに合わせて次の順で連結しま�
 lahaina.dtb -> lahaina-v2.1.dtb -> lahaina-v2.dtb
 ```
 
-主要なrefとbuild configは`config.env`で管理しています。containerプロファイルはCIでbuild可能性を検証しますが、実機導入前には必ずrollback手段を確保し、cold boot、Docker/LXC/KVMのruntimeを個別に確認してください。
+主要なrefとbuild configは`config.env`で管理しています。containerプロファイルはCIでbuild可能性を検証しますが、実機導入前には必ずrollback手段を確保し、cold boot、Docker/LXC/KVMのruntimeを個別に確認してください。KVMの実行には端末firmware／hypervisorがEL2を利用可能にしていることも必要です。
