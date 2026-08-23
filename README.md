@@ -59,7 +59,7 @@ BUILD_CONFIG=kernel/msm-5.4/build.config.lemonade.container build/build.sh
 
 OPlusのWALT schedulerを維持するため、`FAIR_GROUP_SCHED`と`RT_GROUP_SCHED`は有効化しません。`USER_NS`も無効のままです。
 
-### GKI 1.0 KABI適応
+### GKI 1.0 KABI適応とstock module互換
 
 `SYSVIPC`と`POSIX_MQUEUE`を単純に有効化すると、`task_struct`と`user_struct`の既存field位置が変わり、stock vendor moduleのKMI／CRCを壊す可能性があります。そのため、container branch内の`scripts/gki/apply_container_kabi.py`を実行し、追加stateを未使用のAndroid KABI slotへ移します。
 
@@ -67,7 +67,7 @@ OPlusのWALT schedulerを維持するため、`FAIR_GROUP_SCHED`と`RT_GROUP_SCH
 - `struct sysv_shm` → `task_struct` slots 4／5
 - `mq_bytes` → `user_struct` slot 1
 
-Actionは適応後の差分を固定日時のlocal commitにしてからビルドするため、kernel releaseやvermagicへ`-dirty`を付けません。成果物には実際にビルドしたcommit SHAも保存します。
+Actionは適応後の差分を固定日時のlocal commitにしてからビルドするため、kernel releaseへ`-dirty`を付けません。container branchの`.scmversion`はplain hardening headのSCM suffixへ固定し、Imageだけを入れ替えるAnyKernel3でもstock moduleと同じvermagicを維持します。この固定は、CIでplain／containerの同名`.ko`についてvermagicと全modversion CRCが一致した場合だけ合格とします。成果物には実際にビルドしたcommit SHAとKMI比較レポートも保存します。
 
 9RT参考repoにあった別機種Reno10用`module.c`、OverlayFS実装、`user.h`の丸ごと置換、外部runtime patchは使用していません。SM8350ツリー内の専用configと、レビュー可能な最小KABI適応だけを使用します。
 
@@ -98,7 +98,7 @@ plain
 containers
 ```
 
-Pull Requestでは両プロファイルが自動でビルドされ、最終`.config`も検査されます。
+Pull Requestでは両プロファイルが自動でビルドされ、最終`.config`とstock module互換性も検査されます。
 
 ## 成果物
 
@@ -108,6 +108,7 @@ Pull Requestでは両プロファイルが自動でビルドされ、最終`.con
 - 実際に使用した`effective.config`
 - 実際にビルドしたkernel commit SHA
 - manifestのAnyKernel3を使用したflashable ZIP
+- plain／container間のmodule vermagic・modversion CRC比較レポート
 
 DTBは、実機起動確認済みpackageに合わせて次の順で連結します。
 
@@ -115,4 +116,4 @@ DTBは、実機起動確認済みpackageに合わせて次の順で連結しま�
 lahaina.dtb -> lahaina-v2.1.dtb -> lahaina-v2.dtb
 ```
 
-主要なrefとbuild configは`config.env`で管理しています。containerプロファイルはCIでbuild可能性を検証しますが、実機導入前には必ずrollback手段を確保し、cold boot、Docker/LXC/KVMのruntimeを個別に確認してください。KVMの実行には端末firmware／hypervisorがEL2を利用可能にしていることも必要です。
+主要なrefとbuild configは`config.env`で管理しています。containerプロファイルはCIでbuild可能性とstock module互換性を検証しますが、実機導入前には必ずrollback手段を確保し、cold boot、Docker/LXC/KVMのruntimeを個別に確認してください。KVMの実行には端末firmware／hypervisorがEL2を利用可能にしていることも必要です。
