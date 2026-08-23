@@ -1,0 +1,32 @@
+name: Validate Android 17 BPF build profiles
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/a17-bpf-ci.yml'
+      - '.github/workflows/yun-kernel.yml'
+      - 'config.env'
+      - 'README.md'
+      - 'README_EN.md'
+
+permissions:
+  contents: read
+
+jobs:
+  plain:
+    name: Plain Android 17 BPF
+    uses: ./.github/workflows/yun-kernel.yml
+    with:
+      build_profile: plain
+    secrets:
+      PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_PAT }}
+
+  containers:
+    name: LXC + Docker + KVM
+    uses: ./.github/workflows/yun-kernel.yml
+    with:
+      build_profile: containers
+    secrets:
+      PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_PAT }}
