@@ -185,34 +185,32 @@ jobs:
           fi
 
           # Enabling SYSVIPC/POSIX_MQUEUE changes legacy structure layouts.
-          # The container branch owns a reviewed KABI patch that relocates the
-          # new state into unused Android reserve slots. Apply it locally and
-          # make a deterministic commit so setlocalversion/vermagic never gain
-          # a '-dirty' suffix. Plain builds do not touch kernel source.
+          # The container branch owns an idempotent adaptation script that
+          # relocates new state into unused Android KABI slots. Commit its
+          # result locally so setlocalversion/vermagic never gain '-dirty'.
+          # Plain builds do not touch tracked kernel source.
           if [[ "$BUILD_PROFILE" == "containers" ]]; then
-            patch_file="patches/container-kabi.patch"
-            if [[ ! -f "kernel/msm-5.4/$patch_file" ]]; then
-              echo "::error::Missing container KABI patch: $patch_file"
+            kabi_script="scripts/gki/apply_container_kabi.py"
+            if [[ ! -f "kernel/msm-5.4/$kabi_script" ]]; then
+              echo "::error::Missing container KABI adaptation: $kabi_script"
               exit 1
             fi
 
-            if git -C kernel/msm-5.4 apply --reverse --check "$patch_file" \
-                >/dev/null 2>&1; then
-              echo "Container KABI adaptation is already present"
-            else
-              git -C kernel/msm-5.4 apply --check "$patch_file"
-              git -C kernel/msm-5.4 apply "$patch_file"
-              git -C kernel/msm-5.4 diff --check
-              git -C kernel/msm-5.4 config user.name github-actions[bot]
-              git -C kernel/msm-5.4 config user.email \
+            (
+              cd kernel/msm-5.4
+              python3 "$kabi_script"
+              git diff --check
+              git config user.name github-actions[bot]
+              git config user.email \
                 41898282+github-actions[bot]@users.noreply.github.com
-              git -C kernel/msm-5.4 add \
-                include/linux/sched.h include/linux/sched/user.h
-              GIT_AUTHOR_DATE=2000-01-01T00:00:00Z \
-              GIT_COMMITTER_DATE=2000-01-01T00:00:00Z \
-                git -C kernel/msm-5.4 commit --no-gpg-sign \
-                  -m "ANDROID: kabi: preserve container task and user layouts"
-            fi
+              git add include/linux/sched.h include/linux/sched/user.h
+              if ! git diff --cached --quiet; then
+                GIT_AUTHOR_DATE=2000-01-01T00:00:00Z \
+                GIT_COMMITTER_DATE=2000-01-01T00:00:00Z \
+                  git commit --no-gpg-sign \
+                    -m "ANDROID: kabi: preserve container task and user layouts"
+              fi
+            )
 
             grep -q 'ANDROID_KABI_USE(3, struct sysv_sem sysvsem)' \
               kernel/msm-5.4/include/linux/sched.h
@@ -221,10 +219,21 @@ jobs:
           fi
 
           git -C kernel/msm-5.4 submodule sync --recursive
-          git -C kernel/msm-5.4 submodule update --init --recursive --depth=1
+          # Do not force a shallow submodule fetch: the superproject pins a
+          # specific private SukiSU commit that may not be the current branch
+          # tip. Authentication is provided by the credential helper above.
+          GIT_TERMINAL_PROMPT=0 git -C kernel/msm-5.4 submodule update \
+            --init --recursive --force
 
           effective_sha="$(git -C kernel/msm-5.4 rev-parse HEAD)"
-          test -z "$(git -C kernel/msm-5.4 status --porcelain)"
+          tracked_status="$(git -C kernel/msm-5.4 status \
+            --porcelain --untracked-files=no)"
+          if [[ -n "$tracked_status" ]]; then
+            echo "::error::Tracked kernel source is not clean"
+            printf '%s\n' "$tracked_status"
+            exit 1
+          fi
+
           echo "KERNEL_EFFECTIVE_SHA=$effective_sha" >> "$GITHUB_ENV"
           echo "Kernel source branch head: $actual_sha"
           echo "Kernel effective build commit: $effective_sha"
