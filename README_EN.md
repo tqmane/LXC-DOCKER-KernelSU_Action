@@ -26,11 +26,11 @@ LTO=thin
 BUILD_KERNEL=1
 ```
 
-The optional `kernel_ref` input may be used to validate an in-flight kernel PR. When omitted, the current production branch above is always used.
+The optional `kernel_ref` input may be used to validate an in-flight kernel PR. When omitted, the production branch above is used.
 
 ## Plain profile
 
-The normal device build configuration is preserved. The workflow no longer assumes that `PID_NS` or `KVM` must be disabled merely because the profile is named plain; that incorrect assertion previously rejected a successfully compiled kernel.
+The normal device configuration is preserved. The workflow no longer assumes that `PID_NS` or `KVM` must be disabled merely because the profile is named plain; that incorrect assertion previously rejected a successfully compiled kernel.
 
 Both profiles validate:
 
@@ -48,13 +48,13 @@ Both profiles validate:
 
 `lahaina_CONTAINER.config` is applied after the normal GKI, QGKI, and vendor fragments. It adds:
 
-- PID, IPC, NET, and UTS namespaces, SysV IPC, and POSIX message queues;
+- PID, IPC, NET, UTS, and USER namespaces, SysV IPC, and POSIX message queues;
 - device, pids, freezer, memory, and CPU-accounting cgroups;
 - seccomp filters, file handles, OverlayFS, tmpfs, and devtmpfs;
 - veth, bridge netfilter, NAT/iptables, macvlan, ipvlan, vxlan, and tun;
 - arm64 KVM, vhost, and vhost-net.
 
-The OPlus WALT scheduler model is retained, so `FAIR_GROUP_SCHED` and `RT_GROUP_SCHED` remain disabled. `USER_NS` also remains disabled.
+The OPlus WALT scheduler model is retained, so `FAIR_GROUP_SCHED` and `RT_GROUP_SCHED` remain disabled. `USER_NS`, already enabled by the production/plain profile, remains enabled.
 
 ### GKI 1.0 KABI adaptation
 
@@ -67,6 +67,21 @@ To avoid moving established `task_struct` and `user_struct` fields when `SYSVIPC
 The resulting change is recorded in a deterministic local commit before the build, preventing a `-dirty` kernel release suffix.
 
 The unrelated Reno10 `module.c`, OverlayFS implementation, wholesale `user.h` replacement, and external runtime patches from the referenced 9RT workflow are not copied.
+
+### Container module compatibility
+
+Container-specific Kconfig changes can produce different exported-symbol modversion CRCs even when vermagic is identical. This does not mean that the container build failed; it means that the container kernel requires the `.ko` files rebuilt for that exact profile.
+
+The workflow therefore does not publish a kernel-only AnyKernel3 ZIP for the container profile. It publishes a bundle containing:
+
+- `Image`;
+- the concatenated `dtb`;
+- `dtbo.img`;
+- every `.ko` rebuilt by the container build;
+- `Module.symvers`;
+- the effective configuration and build metadata.
+
+This bundle is not an automatic flash ZIP and must not be treated as safe for an Image-only replacement while stock modules remain installed.
 
 ## SukiSU
 
@@ -90,18 +105,29 @@ containers
 
 Normally, leave `kernel_ref` empty.
 
-Pull requests perform full builds for both profiles and validate the effective configuration, BTF sections, and artifact generation. When matching `.ko` files exist in both dist artifacts, their vermagic and modversion CRC requirements are compared. If the dist contains no comparable module set, the report explicitly records that KMI validation was skipped and emits a warning instead of failing an otherwise valid kernel build.
+Pull requests perform full builds for both profiles and validate the effective configuration, BTF sections, and artifacts. Module validation has two layers:
+
+1. Every `.ko` must match the `Module.symvers` produced by its own profile. This is a hard CI gate.
+2. Plain/container CRC differences are recorded as a compatibility report.
+
+A cross-profile CRC difference emits a warning and blocks publication of a container kernel-only package; it does not falsely mark a self-consistent complete container build as broken.
 
 ## Artifacts
+
+Common artifacts:
 
 - Android kernel build framework `dist`;
 - effective `.config`;
 - complete build log;
 - `readelf` section listing;
 - source/effective commit SHAs and build metadata;
-- flashable AnyKernel3 ZIP;
 - SHA-256 checksums;
-- module KMI report.
+- module ABI report.
+
+Profile-specific artifacts:
+
+- plain: a flashable AnyKernel3 ZIP;
+- containers: a `.tar.zst` bundle containing the kernel and matching rebuilt modules.
 
 DTBs are concatenated in the order used by the existing package:
 
@@ -109,4 +135,4 @@ DTBs are concatenated in the order used by the existing package:
 lahaina -> v2.1 -> v2
 ```
 
-A successful CI build does not replace device validation. Test cold boot, Docker, LXC, networking, stock modules, SukiSU, and KVM separately with a rollback path available. KVM runtime also requires firmware or hypervisor support that exposes usable EL2.
+A successful CI build does not replace device validation. Establish a safe deployment method for the matching container modules before testing cold boot, Docker, LXC, networking, SukiSU, and KVM. KVM runtime also requires firmware or hypervisor support that exposes usable EL2.
