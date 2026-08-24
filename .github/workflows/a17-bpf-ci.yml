@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: a17-bpf-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   plain:
     name: Plain Android 17 BPF
@@ -21,7 +25,7 @@ jobs:
     with:
       build_profile: plain
     secrets:
-      PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_PAT }}
+      PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_PAT || secrets.PAT }}
 
   containers:
     name: LXC + Docker + KVM
@@ -29,10 +33,10 @@ jobs:
     with:
       build_profile: containers
     secrets:
-      PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_PAT }}
+      PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_PAT || secrets.PAT }}
 
-  stock-module-kmi:
-    name: Compare stock module KMI
+  module-abi:
+    name: Validate module ABI and packaging policy
     needs:
       - plain
       - containers
@@ -60,7 +64,7 @@ jobs:
           path: artifacts/containers
           merge-multiple: true
 
-      - name: Compare module version requirements and vermagic
+      - name: Validate each module set and report cross-profile compatibility
         shell: bash
         run: |
           set -euo pipefail
@@ -71,23 +75,17 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          plain_root = Path("artifacts/plain")
-          container_root = Path("artifacts/containers")
+          roots = {
+              "plain": Path("artifacts/plain"),
+              "containers": Path("artifacts/containers"),
+          }
           report_path = Path("module-kmi-report.json")
 
           def module_index(root: Path) -> dict[str, Path]:
-              index: dict[str, Path] = {}
-              duplicates: dict[str, list[str]] = {}
-              for module in sorted(root.rglob("*.ko")):
-                  name = module.name
-                  if name in index:
-                      duplicates.setdefault(name, [str(index[name])]).append(str(module))
-                  else:
-                      index[name] = module
-              if duplicates:
-                  formatted = json.dumps(duplicates, indent=2, sort_keys=True)
-                  raise SystemExit(f"duplicate module basenames prevent reliable comparison:\n{formatted}")
-              return index
+              return {
+                  module.relative_to(root).as_posix(): module
+                  for module in sorted(root.rglob("*.ko"))
+              }
 
           def command_output(command: list[str], module: Path) -> str:
               proc = subprocess.run(
@@ -99,7 +97,8 @@ jobs:
               )
               if proc.returncode != 0:
                   raise RuntimeError(
-                      f"failed to inspect {module}: {proc.stderr.strip() or proc.stdout.strip()}"
+                      f"failed to inspect {module}: "
+                      f"{proc.stderr.strip() or proc.stdout.strip()}"
                   )
               return proc.stdout.strip()
 
@@ -108,48 +107,88 @@ jobs:
               output = command_output(["modprobe", "--dump-modversions"], module)
               for raw in output.splitlines():
                   fields = raw.split()
-                  if len(fields) != 2:
-                      continue
-                  crc, symbol = fields
-                  versions[symbol] = crc.lower()
+                  if len(fields) == 2:
+                      crc, symbol = fields
+                      versions[symbol] = crc.lower()
               return versions
 
           def vermagic(module: Path) -> str:
               return command_output(["modinfo", "-F", "vermagic"], module)
 
-          plain_modules = module_index(plain_root)
-          container_modules = module_index(container_root)
-          if not plain_modules:
-              raise SystemExit("plain dist contains no .ko modules; stock-module KMI was not validated")
-          if not container_modules:
-              raise SystemExit("container dist contains no .ko modules; stock-module KMI was not validated")
+          def read_symvers(root: Path) -> dict[str, str]:
+              path = root / "Module.symvers"
+              if not path.is_file():
+                  raise SystemExit(f"missing {path}")
+              result: dict[str, str] = {}
+              for raw in path.read_text(errors="replace").splitlines():
+                  fields = raw.split()
+                  if len(fields) >= 2:
+                      result[fields[1]] = fields[0].lower()
+              return result
 
-          missing_modules: list[str] = []
-          changed_requirements: dict[str, dict[str, object]] = {}
+          modules = {name: module_index(root) for name, root in roots.items()}
+          if not modules["plain"] or not modules["containers"]:
+              raise SystemExit("both dist artifacts must contain their rebuilt .ko modules")
+
+          self_mismatches: dict[str, dict[str, dict[str, str | None]]] = {
+              "plain": {},
+              "containers": {},
+          }
+          symvers = {name: read_symvers(root) for name, root in roots.items()}
+
+          # Hard gate: every rebuilt module must agree with the Module.symvers
+          # generated by its own kernel profile.
+          for profile, profile_modules in modules.items():
+              for relative_path, module in sorted(profile_modules.items()):
+                  bad: dict[str, dict[str, str | None]] = {}
+                  for symbol, module_crc in modversions(module).items():
+                      kernel_crc = symvers[profile].get(symbol)
+                      if kernel_crc != module_crc:
+                          bad[symbol] = {
+                              "module": module_crc,
+                              "kernel": kernel_crc,
+                          }
+                  if bad:
+                      self_mismatches[profile][relative_path] = bad
+
+          if self_mismatches["plain"] or self_mismatches["containers"]:
+              report = {
+                  "status": "failed-self-consistency",
+                  "self_mismatches": self_mismatches,
+              }
+              report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+              print(report_path.read_text())
+              raise SystemExit("a rebuilt module does not match its own kernel Module.symvers")
+
+          # Informational cross-profile comparison. Different Kconfig profiles
+          # can legitimately produce different exported-symbol CRCs. A mismatch
+          # means a kernel-only AnyKernel package is unsafe for the container
+          # profile and its matching rebuilt modules must be deployed with it.
+          missing_from_containers = sorted(
+              set(modules["plain"]) - set(modules["containers"])
+          )
+          extra_in_containers = sorted(
+              set(modules["containers"]) - set(modules["plain"])
+          )
           changed_vermagic: dict[str, dict[str, str]] = {}
-          inspected = 0
+          changed_requirements: dict[str, dict[str, object]] = {}
+          matching = sorted(set(modules["plain"]) & set(modules["containers"]))
 
-          for name, plain_module in sorted(plain_modules.items()):
-              container_module = container_modules.get(name)
-              if container_module is None:
-                  missing_modules.append(name)
-                  continue
+          for relative_path in matching:
+              plain_module = modules["plain"][relative_path]
+              container_module = modules["containers"][relative_path]
+              plain_magic = vermagic(plain_module)
+              container_magic = vermagic(container_module)
+              if plain_magic != container_magic:
+                  changed_vermagic[relative_path] = {
+                      "plain": plain_magic,
+                      "containers": container_magic,
+                  }
 
               plain_versions = modversions(plain_module)
               container_versions = modversions(container_module)
-              plain_vermagic = vermagic(plain_module)
-              container_vermagic = vermagic(container_module)
-              inspected += 1
-
-              if plain_vermagic != container_vermagic:
-                  changed_vermagic[name] = {
-                      "plain": plain_vermagic,
-                      "containers": container_vermagic,
-                  }
-
-              symbols = sorted(set(plain_versions) | set(container_versions))
               changes: dict[str, dict[str, str | None]] = {}
-              for symbol in symbols:
+              for symbol in sorted(set(plain_versions) | set(container_versions)):
                   plain_crc = plain_versions.get(symbol)
                   container_crc = container_versions.get(symbol)
                   if plain_crc != container_crc:
@@ -157,34 +196,43 @@ jobs:
                           "plain": plain_crc,
                           "containers": container_crc,
                       }
-
               if changes:
-                  changed_requirements[name] = {
-                      "plain_path": str(plain_module),
-                      "container_path": str(container_module),
-                      "symbols": changes,
-                  }
+                  changed_requirements[relative_path] = {"symbols": changes}
 
-          extra_modules = sorted(set(container_modules) - set(plain_modules))
+          kernel_only_compatible = not (
+              missing_from_containers
+              or changed_vermagic
+              or changed_requirements
+          )
+          status = (
+              "kernel-only-compatible"
+              if kernel_only_compatible
+              else "profile-specific-modules-required"
+          )
           report = {
-              "plain_module_count": len(plain_modules),
-              "container_module_count": len(container_modules),
-              "inspected_matching_modules": inspected,
-              "missing_from_container": missing_modules,
-              "extra_in_container": extra_modules,
+              "status": status,
+              "plain_module_count": len(modules["plain"]),
+              "container_module_count": len(modules["containers"]),
+              "inspected_matching_modules": len(matching),
+              "self_consistency": "passed",
+              "kernel_only_container_flash_safe": kernel_only_compatible,
+              "missing_from_containers": missing_from_containers,
+              "extra_in_containers": extra_in_containers,
               "changed_vermagic": changed_vermagic,
               "changed_modversion_requirements": changed_requirements,
           }
           report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
           print(report_path.read_text())
 
-          if missing_modules or changed_vermagic or changed_requirements:
-              raise SystemExit(
-                  "container profile is not compatible with the plain/stock module set"
+          if not kernel_only_compatible:
+              print(
+                  "::warning::The container profile has a different module CRC set. "
+                  "Its build is valid with the rebuilt modules in its dist, but a "
+                  "kernel-only AnyKernel package must not be published."
               )
           PY
 
-      - name: Upload KMI report
+      - name: Upload module ABI report
         if: always()
         uses: actions/upload-artifact@v4
         with:
