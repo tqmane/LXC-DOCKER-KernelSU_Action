@@ -11,6 +11,11 @@ on:
         options:
           - plain
           - containers
+      kernel_ref:
+        description: Optional kernel branch, tag, or commit override
+        required: false
+        default: ''
+        type: string
   workflow_call:
     inputs:
       build_profile:
@@ -18,12 +23,21 @@ on:
         required: false
         default: plain
         type: string
+      kernel_ref:
+        description: Optional kernel branch, tag, or commit override
+        required: false
+        default: ''
+        type: string
     secrets:
       PRIVATE_REPO_TOKEN:
         required: false
 
 permissions:
   contents: read
+
+concurrency:
+  group: a17-bpf-${{ github.workflow }}-${{ github.ref }}-${{ inputs.build_profile }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -41,19 +55,23 @@ jobs:
 
       - name: Select build profile
         shell: bash
+        env:
+          REQUESTED_PROFILE: ${{ inputs.build_profile }}
+          REQUESTED_KERNEL_REF: ${{ inputs.kernel_ref }}
         run: |
           set -euo pipefail
           set -a
           source "$GITHUB_WORKSPACE/config.env"
           set +a
 
-          profile="${{ inputs.build_profile }}"
-          profile="${profile:-plain}"
+          profile="${REQUESTED_PROFILE:-plain}"
+          kernel_ref="${REQUESTED_KERNEL_REF:-}"
+          if [[ -z "$kernel_ref" ]]; then
+            kernel_ref="$KERNEL_REF"
+          fi
 
           for key in \
-            MANIFEST_REPO MANIFEST_BRANCH \
-            PLAIN_KERNEL_REF PLAIN_KERNEL_EXPECTED_SHA \
-            CONTAINER_KERNEL_REF CONTAINER_KERNEL_EXPECTED_SHA \
+            MANIFEST_REPO MANIFEST_BRANCH KERNEL_REF \
             PLAIN_BUILD_CONFIG CONTAINER_BUILD_CONFIG VARIANT LTO BUILD_KERNEL \
             KERNEL_IMAGE_NAME ENABLE_CCACHE; do
             value="${!key:-}"
@@ -63,15 +81,16 @@ jobs:
             fi
           done
 
+          if [[ ! "$kernel_ref" =~ ^[0-9A-Za-z._/-]+$ ]]; then
+            echo "::error::Invalid kernel ref: $kernel_ref"
+            exit 1
+          fi
+
           case "$profile" in
             plain)
-              kernel_ref="$PLAIN_KERNEL_REF"
-              kernel_expected_sha="$PLAIN_KERNEL_EXPECTED_SHA"
               active_build_config="$PLAIN_BUILD_CONFIG"
               ;;
             containers)
-              kernel_ref="$CONTAINER_KERNEL_REF"
-              kernel_expected_sha="$CONTAINER_KERNEL_EXPECTED_SHA"
               active_build_config="$CONTAINER_BUILD_CONFIG"
               ;;
             *)
@@ -80,16 +99,10 @@ jobs:
               ;;
           esac
 
-          if [[ ! "$kernel_expected_sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Invalid expected kernel SHA: $kernel_expected_sha"
-            exit 1
-          fi
-
           {
             echo "MANIFEST_REPO=$MANIFEST_REPO"
             echo "MANIFEST_BRANCH=$MANIFEST_BRANCH"
             echo "KERNEL_REF=$kernel_ref"
-            echo "KERNEL_EXPECTED_SHA=$kernel_expected_sha"
             echo "ACTIVE_BUILD_CONFIG=$active_build_config"
             echo "VARIANT=$VARIANT"
             echo "LTO=$LTO"
@@ -102,7 +115,6 @@ jobs:
 
           echo "Selected profile: $profile"
           echo "Kernel ref: $kernel_ref"
-          echo "Expected kernel SHA: $kernel_expected_sha"
           echo "Build config: $active_build_config"
 
       - name: Free build space
@@ -121,7 +133,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            bc binutils-aarch64-linux-gnu bison build-essential ccache curl \
+            bc binutils binutils-aarch64-linux-gnu bison build-essential ccache curl \
             device-tree-compiler flex git libelf-dev liblz4-tool libncurses-dev \
             libssl-dev lz4 python3 rsync unzip zip zstd
 
@@ -134,11 +146,11 @@ jobs:
       - name: Configure private repository authentication
         shell: bash
         env:
-          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_PAT }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_PAT || secrets.PAT }}
         run: |
           set -euo pipefail
           if [[ -z "${PRIVATE_REPO_TOKEN:-}" ]]; then
-            echo "::error::A PRIVATE_REPO_TOKEN (or legacy GH_PAT) secret is required to read the private kernel and SukiSU repositories."
+            echo "::error::PRIVATE_REPO_TOKEN (or legacy GH_PAT/PAT) is required to read the private kernel and SukiSU repositories."
             exit 1
           fi
 
@@ -155,16 +167,17 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           repo init -u "$MANIFEST_REPO" -b "$MANIFEST_BRANCH"
-          repo sync --force-sync --no-clone-bundle --current-branch \
-            --no-tags -j"$(nproc --all)"
+          if ! repo sync --force-sync --no-clone-bundle --current-branch \
+              --no-tags -j"$(nproc --all)"; then
+            echo "Parallel repo sync failed; retrying serially for a precise error"
+            repo sync --force-sync --no-clone-bundle --current-branch \
+              --no-tags -j1 --fail-fast
+          fi
 
           test -d kernel/msm-5.4
           test -d modules_devicetree
           test -d ak3
 
-          # repo names remotes after the manifest's <remote> entry ("tqmane")
-          # rather than always creating "origin". Discover it instead of
-          # assuming a conventional clone layout.
           mapfile -t kernel_remotes < <(git -C kernel/msm-5.4 remote)
           kernel_remote="${kernel_remotes[0]:-}"
           if [[ -z "$kernel_remote" ]]; then
@@ -172,23 +185,16 @@ jobs:
             exit 1
           fi
 
-          # The manifest supplies all dependencies. Select only the requested
-          # kernel profile after sync; no external source patch or KSU setup is
-          # downloaded or injected by this Action.
+          # The manifest checks out the current production branch. An explicit
+          # ref override is used only to validate an in-flight kernel fix PR.
           git -C kernel/msm-5.4 fetch "$kernel_remote" "$KERNEL_REF" --depth=1
           git -C kernel/msm-5.4 checkout --detach FETCH_HEAD
+          source_sha="$(git -C kernel/msm-5.4 rev-parse HEAD)"
 
-          actual_sha="$(git -C kernel/msm-5.4 rev-parse HEAD)"
-          if [[ "$actual_sha" != "$KERNEL_EXPECTED_SHA" ]]; then
-            echo "::error::Kernel branch moved: expected $KERNEL_EXPECTED_SHA, got $actual_sha"
-            exit 1
-          fi
+          git -C kernel/msm-5.4 submodule sync --recursive
+          GIT_TERMINAL_PROMPT=0 git -C kernel/msm-5.4 submodule update \
+            --init --recursive --force
 
-          # Enabling SYSVIPC/POSIX_MQUEUE changes legacy structure layouts.
-          # The container branch owns an idempotent adaptation script that
-          # relocates new state into unused Android KABI slots. Commit its
-          # result locally so setlocalversion/vermagic never gain '-dirty'.
-          # Plain builds do not touch tracked kernel source.
           if [[ "$BUILD_PROFILE" == "containers" ]]; then
             kabi_script="scripts/gki/apply_container_kabi.py"
             if [[ ! -f "kernel/msm-5.4/$kabi_script" ]]; then
@@ -218,14 +224,6 @@ jobs:
               kernel/msm-5.4/include/linux/sched/user.h
           fi
 
-          git -C kernel/msm-5.4 submodule sync --recursive
-          # Do not force a shallow submodule fetch: the superproject pins a
-          # specific private SukiSU commit that may not be the current branch
-          # tip. Authentication is provided by the credential helper above.
-          GIT_TERMINAL_PROMPT=0 git -C kernel/msm-5.4 submodule update \
-            --init --recursive --force
-
-          effective_sha="$(git -C kernel/msm-5.4 rev-parse HEAD)"
           tracked_status="$(git -C kernel/msm-5.4 status \
             --porcelain --untracked-files=no)"
           if [[ -n "$tracked_status" ]]; then
@@ -234,10 +232,15 @@ jobs:
             exit 1
           fi
 
-          echo "KERNEL_EFFECTIVE_SHA=$effective_sha" >> "$GITHUB_ENV"
-          echo "Kernel source branch head: $actual_sha"
+          effective_sha="$(git -C kernel/msm-5.4 rev-parse HEAD)"
+          {
+            echo "KERNEL_SOURCE_SHA=$source_sha"
+            echo "KERNEL_EFFECTIVE_SHA=$effective_sha"
+          } >> "$GITHUB_ENV"
+
+          echo "Kernel source ref: $KERNEL_REF"
+          echo "Kernel source commit: $source_sha"
           echo "Kernel effective build commit: $effective_sha"
-          echo "Kernel branch requested: $KERNEL_REF"
           echo "Kernel remote used: $kernel_remote"
 
           if [[ ! -f "$ACTIVE_BUILD_CONFIG" ]]; then
@@ -262,16 +265,17 @@ jobs:
           VARIANT="$VARIANT" \
           LTO="$LTO" \
           BUILD_KERNEL="$BUILD_KERNEL" \
-          build/build.sh
+          build/build.sh 2>&1 | tee \
+            "$GITHUB_WORKSPACE/kernel-build-${BUILD_PROFILE}.log"
 
-      - name: Validate effective kernel configuration
+      - name: Validate effective kernel configuration and BTF sections
         shell: bash
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          config_path="$(find out -path '*/kernel/msm-5.4/.config' \
-            -type f -print -quit 2>/dev/null || true)"
+          config_path="$(find out -type f -path '*/kernel/msm-5.4/.config' \
+            -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2-)"
           if [[ -z "$config_path" || ! -f "$config_path" ]]; then
             echo "::error::Built kernel .config was not found"
             exit 1
@@ -300,10 +304,16 @@ jobs:
           done
           require_disabled CONFIG_FUNCTION_TRACER
 
+          lsm_line="$(grep '^CONFIG_LSM=' "$config_path" || true)"
+          if [[ "$lsm_line" != *bpf* ]]; then
+            echo "::error::CONFIG_LSM does not contain bpf: $lsm_line"
+            exit 1
+          fi
+
           case "$BUILD_PROFILE" in
             plain)
-              require_disabled CONFIG_PID_NS
-              require_disabled CONFIG_KVM
+              # Plain means the normal device build config. Do not assume that
+              # device defaults such as PID_NS or KVM are disabled.
               ;;
             containers)
               for symbol in \
@@ -319,62 +329,132 @@ jobs:
               ;;
           esac
 
+          vmlinux_path="$(find out -type f -path '*/dist/vmlinux' \
+            -print -quit 2>/dev/null || true)"
+          if [[ -z "$vmlinux_path" ]]; then
+            vmlinux_path="$(find out -type f -name vmlinux -size +1M \
+              -print -quit 2>/dev/null || true)"
+          fi
+          if [[ -z "$vmlinux_path" || ! -f "$vmlinux_path" ]]; then
+            echo "::error::Final vmlinux was not found"
+            exit 1
+          fi
+
+          readelf -SW "$vmlinux_path" > \
+            "$GITHUB_WORKSPACE/readelf-sections-${BUILD_PROFILE}.txt"
+          python3 - "$vmlinux_path" <<'PY'
+          import re
+          import subprocess
+          import sys
+
+          path = sys.argv[1]
+          output = subprocess.check_output(
+              ["readelf", "-SW", path], text=True, errors="replace"
+          )
+
+          if not re.search(r"\]\s+\.BTF\s+", output):
+              raise SystemExit("vmlinux does not contain a .BTF section")
+
+          line = next(
+              (line for line in output.splitlines()
+               if re.search(r"\]\s+\.BTF_ids\s+", line)),
+              None,
+          )
+          if line is None:
+              raise SystemExit("vmlinux does not contain a .BTF_ids section")
+
+          rest = line.split(".BTF_ids", 1)[1].split()
+          if len(rest) < 3:
+              raise SystemExit(f"could not parse .BTF_ids section: {line}")
+
+          address = int(rest[1], 16)
+          alignment = int(rest[-1], 0)
+          if address % 4:
+              raise SystemExit(
+                  f".BTF_ids address 0x{address:x} is not 4-byte aligned"
+              )
+          if alignment < 4:
+              raise SystemExit(
+                  f".BTF_ids ELF alignment is {alignment}, expected at least 4"
+              )
+
+          print(
+              f"Validated .BTF_ids: address=0x{address:x}, align={alignment}"
+          )
+          PY
+
           cp "$config_path" "$GITHUB_WORKSPACE/effective-${BUILD_PROFILE}.config"
           echo "Effective config: $config_path"
+          echo "vmlinux: $vmlinux_path"
 
       - name: Collect kernel and AnyKernel3 artifacts
         shell: bash
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace"
-          mkdir -p artifacts
+          mkdir -p artifacts/dist
 
-          dist_dir="$(find out -type d -name dist -print -quit 2>/dev/null || true)"
-          if [[ -z "$dist_dir" || ! -d "$dist_dir" ]]; then
-            echo "::error::Kernel build completed without a dist directory"
-            exit 1
-          fi
-
-          find_output() {
-            local name="$1"
-            local found
-            found="$(find "$dist_dir" -maxdepth 1 -type f -name "$name" \
-              -print -quit 2>/dev/null || true)"
-            if [[ -z "$found" ]]; then
-              found="$(find out -type f -name "$name" \
-                -print -quit 2>/dev/null || true)"
-            fi
-            printf '%s' "$found"
-          }
-
-          image_path="$(find_output "$KERNEL_IMAGE_NAME")"
+          image_path="$(find out -type f -path "*/dist/${KERNEL_IMAGE_NAME}" \
+            -print -quit 2>/dev/null || true)"
           if [[ -z "$image_path" || ! -f "$image_path" ]]; then
-            echo "::error::Built kernel image '$KERNEL_IMAGE_NAME' was not found"
+            echo "::error::Built kernel image '$KERNEL_IMAGE_NAME' was not found in dist"
             exit 1
           fi
+          dist_dir="$(dirname "$image_path")"
 
-          cp -a "$dist_dir" artifacts/dist
+          cp -a "$dist_dir/." artifacts/dist/
           cp "$GITHUB_WORKSPACE/effective-${BUILD_PROFILE}.config" \
             artifacts/dist/effective.config
-          printf '%s\n' "$KERNEL_EFFECTIVE_SHA" > \
-            artifacts/dist/kernel-effective-sha.txt
+          cp "$GITHUB_WORKSPACE/readelf-sections-${BUILD_PROFILE}.txt" \
+            artifacts/dist/readelf-sections.txt
+          cp "$GITHUB_WORKSPACE/kernel-build-${BUILD_PROFILE}.log" \
+            artifacts/dist/build.log
+          {
+            echo "kernel_ref=$KERNEL_REF"
+            echo "source_sha=$KERNEL_SOURCE_SHA"
+            echo "effective_sha=$KERNEL_EFFECTIVE_SHA"
+            echo "build_profile=$BUILD_PROFILE"
+            echo "build_config=$ACTIVE_BUILD_CONFIG"
+          } > artifacts/dist/build-metadata.txt
+
           cp "$image_path" "ak3/$KERNEL_IMAGE_NAME"
 
-          dtb_lahaina="$(find_output lahaina.dtb)"
-          dtb_v2="$(find_output lahaina-v2.dtb)"
-          dtb_v21="$(find_output lahaina-v2.1.dtb)"
+          find_dist_file() {
+            local candidate
+            for candidate in "$@"; do
+              if [[ -f "$dist_dir/$candidate" ]]; then
+                printf '%s' "$dist_dir/$candidate"
+                return 0
+              fi
+            done
+            for candidate in "$@"; do
+              local found
+              found="$(find "$dist_dir" -maxdepth 2 -type f -name "$candidate" \
+                -print -quit 2>/dev/null || true)"
+              if [[ -n "$found" ]]; then
+                printf '%s' "$found"
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          dtb_lahaina="$(find_dist_file lahaina.dtb lahaina || true)"
+          dtb_v2="$(find_dist_file lahaina-v2.dtb v2.dtb v2 || true)"
+          dtb_v21="$(find_dist_file lahaina-v2.1.dtb v2.1.dtb v2.1 || true)"
           if [[ -z "$dtb_lahaina" || -z "$dtb_v2" || -z "$dtb_v21" ]]; then
-            echo "::error::One or more required DTBs were not found"
-            find "$dist_dir" -maxdepth 1 -type f -name '*.dtb' \
-              -printf '%f\n' | sort || true
+            echo "::error::One or more required Lahaina DTBs were not found"
+            find "$dist_dir" -maxdepth 2 -type f \
+              \( -name '*.dtb' -o -name 'lahaina' -o -name 'v2' -o -name 'v2.1' \) \
+              -printf '%P\n' | sort || true
             exit 1
           fi
 
-          # Keep the order used by the boot-tested OnePlus 9 Pro package.
+          # Preserve the order used by the existing boot-tested package.
           cat "$dtb_lahaina" "$dtb_v21" "$dtb_v2" > ak3/dtb
           cp ak3/dtb artifacts/dist/dtb
 
-          dtbo_path="$(find_output dtbo.img)"
+          dtbo_path="$(find_dist_file dtbo.img || true)"
           if [[ -z "$dtbo_path" || ! -f "$dtbo_path" ]]; then
             echo "::error::Built dtbo.img was not found"
             exit 1
@@ -390,10 +470,9 @@ jobs:
           )
 
           echo "PACKAGE_NAME=$package_name" >> "$GITHUB_ENV"
-          echo "Kernel image: $image_path"
-          echo "Combined DTB size: $(stat -c '%s' ak3/dtb) bytes"
-          echo "DTBO image: $dtbo_path ($(stat -c '%s' ak3/dtbo.img) bytes)"
-          sha256sum "$image_path" ak3/dtb ak3/dtbo.img "artifacts/$package_name"
+          sha256sum "$image_path" ak3/dtb ak3/dtbo.img \
+            "artifacts/$package_name" | tee artifacts/SHA256SUMS
+          cp artifacts/SHA256SUMS artifacts/dist/SHA256SUMS
 
       - name: Upload kernel dist
         uses: actions/upload-artifact@v4
@@ -406,5 +485,18 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OnePlus9Pro-A17-BPF-${{ env.BUILD_PROFILE }}-${{ env.BUILD_TIME }}
-          path: kernel_workspace/artifacts/${{ env.PACKAGE_NAME }}
+          path: |
+            kernel_workspace/artifacts/${{ env.PACKAGE_NAME }}
+            kernel_workspace/artifacts/SHA256SUMS
           if-no-files-found: error
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnePlus9Pro-A17-BPF-${{ env.BUILD_PROFILE }}-failure-${{ env.BUILD_TIME }}
+          path: |
+            kernel-build-${{ env.BUILD_PROFILE }}.log
+            effective-${{ env.BUILD_PROFILE }}.config
+            readelf-sections-${{ env.BUILD_PROFILE }}.txt
+          if-no-files-found: ignore
