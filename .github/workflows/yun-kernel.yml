@@ -1,18 +1,34 @@
-name: Build OnePlus 9 Pro LXC/Docker kernel
+name: Build OnePlus 9 Pro Android 17 BPF kernel
 
 on:
-  watch:
-    types: [started]
+  workflow_dispatch:
+    inputs:
+      build_profile:
+        description: Kernel profile to build
+        required: true
+        default: plain
+        type: choice
+        options:
+          - plain
+          - containers
   workflow_call:
+    inputs:
+      build_profile:
+        description: Kernel profile to build
+        required: false
+        default: plain
+        type: string
     secrets:
       PRIVATE_REPO_TOKEN:
         required: false
 
+permissions:
+  contents: read
+
 jobs:
   build:
-    name: OnePlus 9 Pro / manifest / LXC + Docker
-    runs-on: ubuntu-latest
-    if: github.event_name != 'watch' || github.event.repository.owner.id == github.event.sender.id
+    name: OnePlus 9 Pro / ${{ inputs.build_profile }}
+    runs-on: ubuntu-24.04
 
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
@@ -23,7 +39,7 @@ jobs:
       - name: Checkout action repository
         uses: actions/checkout@v4
 
-      - name: Load build configuration
+      - name: Select build profile
         shell: bash
         run: |
           set -euo pipefail
@@ -31,19 +47,63 @@ jobs:
           source "$GITHUB_WORKSPACE/config.env"
           set +a
 
+          profile="${{ inputs.build_profile }}"
+          profile="${profile:-plain}"
+
           for key in \
-            MANIFEST_REPO MANIFEST_BRANCH BUILD_CONFIG VARIANT LTO BUILD_KERNEL \
-            KERNEL_IMAGE_NAME CONFIG_FRAGMENT LXC_DOCKER LXC_PATCH \
-            ANDROID_PARANOID_NETWORK_OFF ENABLE_KVM ENABLE_CCACHE; do
+            MANIFEST_REPO MANIFEST_BRANCH \
+            PLAIN_KERNEL_REF PLAIN_KERNEL_EXPECTED_SHA \
+            CONTAINER_KERNEL_REF CONTAINER_KERNEL_EXPECTED_SHA \
+            PLAIN_BUILD_CONFIG CONTAINER_BUILD_CONFIG VARIANT LTO BUILD_KERNEL \
+            KERNEL_IMAGE_NAME ENABLE_CCACHE; do
             value="${!key:-}"
             if [[ -z "$value" ]]; then
               echo "::error::Missing $key in config.env"
               exit 1
             fi
-            echo "$key=$value" >> "$GITHUB_ENV"
           done
 
-          echo "BUILD_TIME=$(TZ=Asia/Tokyo date '+%Y%m%d-%H%M')" >> "$GITHUB_ENV"
+          case "$profile" in
+            plain)
+              kernel_ref="$PLAIN_KERNEL_REF"
+              kernel_expected_sha="$PLAIN_KERNEL_EXPECTED_SHA"
+              active_build_config="$PLAIN_BUILD_CONFIG"
+              ;;
+            containers)
+              kernel_ref="$CONTAINER_KERNEL_REF"
+              kernel_expected_sha="$CONTAINER_KERNEL_EXPECTED_SHA"
+              active_build_config="$CONTAINER_BUILD_CONFIG"
+              ;;
+            *)
+              echo "::error::Unsupported build profile: $profile"
+              exit 1
+              ;;
+          esac
+
+          if [[ ! "$kernel_expected_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid expected kernel SHA: $kernel_expected_sha"
+            exit 1
+          fi
+
+          {
+            echo "MANIFEST_REPO=$MANIFEST_REPO"
+            echo "MANIFEST_BRANCH=$MANIFEST_BRANCH"
+            echo "KERNEL_REF=$kernel_ref"
+            echo "KERNEL_EXPECTED_SHA=$kernel_expected_sha"
+            echo "ACTIVE_BUILD_CONFIG=$active_build_config"
+            echo "VARIANT=$VARIANT"
+            echo "LTO=$LTO"
+            echo "BUILD_KERNEL=$BUILD_KERNEL"
+            echo "KERNEL_IMAGE_NAME=$KERNEL_IMAGE_NAME"
+            echo "ENABLE_CCACHE=$ENABLE_CCACHE"
+            echo "BUILD_PROFILE=$profile"
+            echo "BUILD_TIME=$(TZ=Asia/Tokyo date '+%Y%m%d-%H%M')"
+          } >> "$GITHUB_ENV"
+
+          echo "Selected profile: $profile"
+          echo "Kernel ref: $kernel_ref"
+          echo "Expected kernel SHA: $kernel_expected_sha"
+          echo "Build config: $active_build_config"
 
       - name: Free build space
         uses: easimon/maximize-build-space@master
@@ -66,23 +126,25 @@ jobs:
             libssl-dev lz4 python3 rsync unzip zip zstd
 
           mkdir -p "$HOME/bin"
-          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo \
+            -o "$HOME/bin/repo"
           chmod +x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
       - name: Configure private repository authentication
         shell: bash
         env:
-          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_PAT }}
         run: |
           set -euo pipefail
           if [[ -z "${PRIVATE_REPO_TOKEN:-}" ]]; then
-            echo "::error::PRIVATE_REPO_TOKEN is required. Add a fine-grained PAT with read access to every private repository referenced by the manifest."
+            echo "::error::A PRIVATE_REPO_TOKEN (or legacy GH_PAT) secret is required to read the private kernel and SukiSU repositories."
             exit 1
           fi
 
           git config --global credential.helper store
-          printf 'https://x-access-token:%s@github.com\n' "$PRIVATE_REPO_TOKEN" > "$HOME/.git-credentials"
+          printf 'https://x-access-token:%s@github.com\n' \
+            "$PRIVATE_REPO_TOKEN" > "$HOME/.git-credentials"
           chmod 600 "$HOME/.git-credentials"
 
       - name: Initialize and sync kernel manifest
@@ -93,144 +155,101 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           repo init -u "$MANIFEST_REPO" -b "$MANIFEST_BRANCH"
-          repo sync --force-sync --no-clone-bundle --current-branch --no-tags -j"$(nproc --all)"
+          repo sync --force-sync --no-clone-bundle --current-branch \
+            --no-tags -j"$(nproc --all)"
 
           test -d kernel/msm-5.4
           test -d modules_devicetree
           test -d ak3
 
-          echo "Kernel source: $(git -C kernel/msm-5.4 rev-parse HEAD)"
-
-      - name: Enable Android-safe minimal LXC and Docker configuration
-        if: env.LXC_DOCKER == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-
-          if [[ ! -f "$CONFIG_FRAGMENT" ]]; then
-            echo "::error::Config fragment not found: $CONFIG_FRAGMENT"
+          # repo names remotes after the manifest's <remote> entry ("tqmane")
+          # rather than always creating "origin". Discover it instead of
+          # assuming a conventional clone layout.
+          mapfile -t kernel_remotes < <(git -C kernel/msm-5.4 remote)
+          kernel_remote="${kernel_remotes[0]:-}"
+          if [[ -z "$kernel_remote" ]]; then
+            echo "::error::The manifest kernel checkout has no Git remote"
             exit 1
           fi
 
-          set_y() {
-            local symbol="$1"
-            sed -i -E "/^${symbol}=|^# ${symbol} is not set$/d" "$CONFIG_FRAGMENT"
-            echo "${symbol}=y" >> "$CONFIG_FRAGMENT"
-          }
+          # The manifest supplies all dependencies. Select only the requested
+          # kernel profile after sync; no external source patch or KSU setup is
+          # downloaded or injected by this Action.
+          git -C kernel/msm-5.4 fetch "$kernel_remote" "$KERNEL_REF" --depth=1
+          git -C kernel/msm-5.4 checkout --detach FETCH_HEAD
 
-          set_n() {
-            local symbol="$1"
-            sed -i -E "/^${symbol}=|^# ${symbol} is not set$/d" "$CONFIG_FRAGMENT"
-            echo "# ${symbol} is not set" >> "$CONFIG_FRAGMENT"
-          }
+          actual_sha="$(git -C kernel/msm-5.4 rev-parse HEAD)"
+          if [[ "$actual_sha" != "$KERNEL_EXPECTED_SHA" ]]; then
+            echo "::error::Kernel branch moved: expected $KERNEL_EXPECTED_SHA, got $actual_sha"
+            exit 1
+          fi
 
-          # Keep the vendor/WALT scheduler configuration intact. Do NOT enable
-          # FAIR_GROUP_SCHED, RT_GROUP_SCHED or SCHED_AUTOGROUP here.
-          # The stock QGKI config already provides most Docker primitives;
-          # only add the missing/rootful-container pieces and reassert the
-          # already-safe networking/storage requirements.
-          for symbol in \
-            CONFIG_NAMESPACES \
-            CONFIG_PID_NS \
-            CONFIG_IPC_NS \
-            CONFIG_NET_NS \
-            CONFIG_UTS_NS \
-            CONFIG_POSIX_MQUEUE \
-            CONFIG_CGROUPS \
-            CONFIG_CGROUP_CPUACCT \
-            CONFIG_CGROUP_DEVICE \
-            CONFIG_CGROUP_FREEZER \
-            CONFIG_CGROUP_SCHED \
-            CONFIG_CGROUP_PIDS \
-            CONFIG_CPUSETS \
-            CONFIG_MEMCG \
-            CONFIG_CGROUP_BPF \
-            CONFIG_BPF_SYSCALL \
-            CONFIG_SECCOMP \
-            CONFIG_SECCOMP_FILTER \
-            CONFIG_FHANDLE \
-            CONFIG_NETFILTER \
-            CONFIG_NF_CONNTRACK \
-            CONFIG_NETFILTER_XTABLES \
-            CONFIG_NETFILTER_XT_MATCH_ADDRTYPE \
-            CONFIG_NETFILTER_XT_MATCH_CONNTRACK \
-            CONFIG_IP_NF_IPTABLES \
-            CONFIG_IP_NF_FILTER \
-            CONFIG_IP_NF_NAT \
-            CONFIG_IP_NF_TARGET_MASQUERADE \
-            CONFIG_BRIDGE \
-            CONFIG_VETH \
-            CONFIG_OVERLAY_FS; do
-            set_y "$symbol"
-          done
-
-          # Explicitly keep optional storage drivers that previously broke the
-          # build disabled. OverlayFS is enough for rootful Docker here.
-          set_n CONFIG_BTRFS_FS
-          set_n CONFIG_AUFS_FS
-
-          echo "Minimal LXC/Docker fragment additions:"
-          grep -E 'CONFIG_(PID_NS|IPC_NS|NET_NS|UTS_NS|CGROUP_DEVICE|CGROUP_PIDS|FHANDLE|SECCOMP_FILTER|VETH|OVERLAY_FS|FAIR_GROUP_SCHED|RT_GROUP_SCHED|SCHED_AUTOGROUP)' "$CONFIG_FRAGMENT" || true
-
-      - name: Apply optional LXC runtime patches
-        if: env.LXC_PATCH == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-
-          curl -fsSL https://raw.githubusercontent.com/wu17481748/android-lxc-docker/main/cgroup.patch -o /tmp/cgroup.patch
-          curl -fsSL https://raw.githubusercontent.com/wu17481748/android-lxc-docker/main/xt_qtaguid.patch -o /tmp/xt_qtaguid.patch
-
-          apply_patch() {
-            local patch_file="$1"
-            local label="$2"
-            if patch --dry-run -d kernel/msm-5.4 -p1 < "$patch_file" >/dev/null 2>&1; then
-              patch -d kernel/msm-5.4 -p1 < "$patch_file"
-              echo "$label applied"
-            elif patch -R --dry-run -d kernel/msm-5.4 -p1 < "$patch_file" >/dev/null 2>&1; then
-              echo "$label is already applied"
-            else
-              echo "::error::$label does not apply cleanly"
+          # Enabling SYSVIPC/POSIX_MQUEUE changes legacy structure layouts.
+          # The container branch owns an idempotent adaptation script that
+          # relocates new state into unused Android KABI slots. Commit its
+          # result locally so setlocalversion/vermagic never gain '-dirty'.
+          # Plain builds do not touch tracked kernel source.
+          if [[ "$BUILD_PROFILE" == "containers" ]]; then
+            kabi_script="scripts/gki/apply_container_kabi.py"
+            if [[ ! -f "kernel/msm-5.4/$kabi_script" ]]; then
+              echo "::error::Missing container KABI adaptation: $kabi_script"
               exit 1
             fi
-          }
 
-          if [[ -f kernel/msm-5.4/kernel/cgroup/cgroup.c ]]; then
-            apply_patch /tmp/cgroup.patch "cgroup LXC patch"
+            (
+              cd kernel/msm-5.4
+              python3 "$kabi_script"
+              git diff --check
+              git config user.name github-actions[bot]
+              git config user.email \
+                41898282+github-actions[bot]@users.noreply.github.com
+              git add include/linux/sched.h include/linux/sched/user.h
+              if ! git diff --cached --quiet; then
+                GIT_AUTHOR_DATE=2000-01-01T00:00:00Z \
+                GIT_COMMITTER_DATE=2000-01-01T00:00:00Z \
+                  git commit --no-gpg-sign \
+                    -m "ANDROID: kabi: preserve container task and user layouts"
+              fi
+            )
+
+            grep -q 'ANDROID_KABI_USE(3, struct sysv_sem sysvsem)' \
+              kernel/msm-5.4/include/linux/sched.h
+            grep -q 'ANDROID_KABI_USE(1, unsigned long mq_bytes)' \
+              kernel/msm-5.4/include/linux/sched/user.h
           fi
-          if [[ -f kernel/msm-5.4/net/netfilter/xt_qtaguid.c ]]; then
-            apply_patch /tmp/xt_qtaguid.patch "xt_qtaguid LXC patch"
+
+          git -C kernel/msm-5.4 submodule sync --recursive
+          # Do not force a shallow submodule fetch: the superproject pins a
+          # specific private SukiSU commit that may not be the current branch
+          # tip. Authentication is provided by the credential helper above.
+          GIT_TERMINAL_PROMPT=0 git -C kernel/msm-5.4 submodule update \
+            --init --recursive --force
+
+          effective_sha="$(git -C kernel/msm-5.4 rev-parse HEAD)"
+          tracked_status="$(git -C kernel/msm-5.4 status \
+            --porcelain --untracked-files=no)"
+          if [[ -n "$tracked_status" ]]; then
+            echo "::error::Tracked kernel source is not clean"
+            printf '%s\n' "$tracked_status"
+            exit 1
           fi
 
-      - name: Disable Android paranoid network
-        if: env.ANDROID_PARANOID_NETWORK_OFF == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-          sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' "$CONFIG_FRAGMENT"
-          echo '# CONFIG_ANDROID_PARANOID_NETWORK is not set' >> "$CONFIG_FRAGMENT"
+          echo "KERNEL_EFFECTIVE_SHA=$effective_sha" >> "$GITHUB_ENV"
+          echo "Kernel source branch head: $actual_sha"
+          echo "Kernel effective build commit: $effective_sha"
+          echo "Kernel branch requested: $KERNEL_REF"
+          echo "Kernel remote used: $kernel_remote"
 
-      - name: Enable KVM configuration
-        if: env.ENABLE_KVM == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-          cat >> "$CONFIG_FRAGMENT" <<'EOF'
-          CONFIG_VIRTUALIZATION=y
-          CONFIG_KVM=y
-          CONFIG_VHOST_NET=y
-          CONFIG_VHOST_CROSS_ENDIAN_LEGACY=y
-          EOF
+          if [[ ! -f "$ACTIVE_BUILD_CONFIG" ]]; then
+            echo "::error::BUILD_CONFIG does not exist: $ACTIVE_BUILD_CONFIG"
+            exit 1
+          fi
 
       - name: Configure ccache
         if: env.ENABLE_CCACHE == 'true'
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: oneplus9pro-lxc-docker-manifest
+          key: oneplus9pro-a17-bpf-${{ env.BUILD_PROFILE }}
           max-size: 2G
 
       - name: Build with Android kernel build framework
@@ -239,16 +258,69 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          if [[ ! -f "$BUILD_CONFIG" ]]; then
-            echo "::error::BUILD_CONFIG does not exist: $BUILD_CONFIG"
-            exit 1
-          fi
-
-          BUILD_CONFIG="$BUILD_CONFIG" \
+          BUILD_CONFIG="$ACTIVE_BUILD_CONFIG" \
           VARIANT="$VARIANT" \
           LTO="$LTO" \
           BUILD_KERNEL="$BUILD_KERNEL" \
           build/build.sh
+
+      - name: Validate effective kernel configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          config_path="$(find out -path '*/kernel/msm-5.4/.config' \
+            -type f -print -quit 2>/dev/null || true)"
+          if [[ -z "$config_path" || ! -f "$config_path" ]]; then
+            echo "::error::Built kernel .config was not found"
+            exit 1
+          fi
+
+          require_y() {
+            local symbol="$1"
+            grep -qx "${symbol}=y" "$config_path" || {
+              echo "::error::$symbol is not enabled in $BUILD_PROFILE profile"
+              exit 1
+            }
+          }
+
+          require_disabled() {
+            local symbol="$1"
+            if grep -Eq "^${symbol}=(y|m)$" "$config_path"; then
+              echo "::error::$symbol must be disabled in $BUILD_PROFILE profile"
+              exit 1
+            fi
+          }
+
+          for symbol in \
+            CONFIG_BPF_SYSCALL CONFIG_BPF_JIT CONFIG_BPF_JIT_ALWAYS_ON \
+            CONFIG_BPF_LSM CONFIG_DEBUG_INFO_BTF; do
+            require_y "$symbol"
+          done
+          require_disabled CONFIG_FUNCTION_TRACER
+
+          case "$BUILD_PROFILE" in
+            plain)
+              require_disabled CONFIG_PID_NS
+              require_disabled CONFIG_KVM
+              ;;
+            containers)
+              for symbol in \
+                CONFIG_IPC_NS CONFIG_PID_NS CONFIG_NET_NS CONFIG_SYSVIPC \
+                CONFIG_POSIX_MQUEUE CONFIG_CGROUP_DEVICE CONFIG_CGROUP_PIDS \
+                CONFIG_SECCOMP_FILTER CONFIG_FHANDLE CONFIG_OVERLAY_FS \
+                CONFIG_BRIDGE_NETFILTER CONFIG_VETH CONFIG_KVM CONFIG_VHOST_NET; do
+                require_y "$symbol"
+              done
+              require_disabled CONFIG_USER_NS
+              require_disabled CONFIG_FAIR_GROUP_SCHED
+              require_disabled CONFIG_RT_GROUP_SCHED
+              ;;
+          esac
+
+          cp "$config_path" "$GITHUB_WORKSPACE/effective-${BUILD_PROFILE}.config"
+          echo "Effective config: $config_path"
 
       - name: Collect kernel and AnyKernel3 artifacts
         shell: bash
@@ -257,8 +329,8 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           mkdir -p artifacts
 
-          DIST_DIR="$(find out -type d -name dist -print -quit 2>/dev/null || true)"
-          if [[ -z "$DIST_DIR" || ! -d "$DIST_DIR" ]]; then
+          dist_dir="$(find out -type d -name dist -print -quit 2>/dev/null || true)"
+          if [[ -z "$dist_dir" || ! -d "$dist_dir" ]]; then
             echo "::error::Kernel build completed without a dist directory"
             exit 1
           fi
@@ -266,62 +338,73 @@ jobs:
           find_output() {
             local name="$1"
             local found
-            found="$(find "$DIST_DIR" -maxdepth 1 -type f -name "$name" -print -quit 2>/dev/null || true)"
+            found="$(find "$dist_dir" -maxdepth 1 -type f -name "$name" \
+              -print -quit 2>/dev/null || true)"
             if [[ -z "$found" ]]; then
-              found="$(find out -type f -name "$name" -print -quit 2>/dev/null || true)"
+              found="$(find out -type f -name "$name" \
+                -print -quit 2>/dev/null || true)"
             fi
             printf '%s' "$found"
           }
 
-          IMAGE_PATH="$(find_output "$KERNEL_IMAGE_NAME")"
-          if [[ -z "$IMAGE_PATH" || ! -f "$IMAGE_PATH" ]]; then
+          image_path="$(find_output "$KERNEL_IMAGE_NAME")"
+          if [[ -z "$image_path" || ! -f "$image_path" ]]; then
             echo "::error::Built kernel image '$KERNEL_IMAGE_NAME' was not found"
             exit 1
           fi
 
-          cp -a "$DIST_DIR" artifacts/dist
-          cp "$IMAGE_PATH" "ak3/$KERNEL_IMAGE_NAME"
+          cp -a "$dist_dir" artifacts/dist
+          cp "$GITHUB_WORKSPACE/effective-${BUILD_PROFILE}.config" \
+            artifacts/dist/effective.config
+          printf '%s\n' "$KERNEL_EFFECTIVE_SHA" > \
+            artifacts/dist/kernel-effective-sha.txt
+          cp "$image_path" "ak3/$KERNEL_IMAGE_NAME"
 
-          DTB_LAHAINA="$(find_output lahaina.dtb)"
-          DTB_V2="$(find_output lahaina-v2.dtb)"
-          DTB_V21="$(find_output lahaina-v2.1.dtb)"
-          if [[ -z "$DTB_LAHAINA" || -z "$DTB_V2" || -z "$DTB_V21" ]]; then
+          dtb_lahaina="$(find_output lahaina.dtb)"
+          dtb_v2="$(find_output lahaina-v2.dtb)"
+          dtb_v21="$(find_output lahaina-v2.1.dtb)"
+          if [[ -z "$dtb_lahaina" || -z "$dtb_v2" || -z "$dtb_v21" ]]; then
             echo "::error::One or more required DTBs were not found"
-            find "$DIST_DIR" -maxdepth 1 -type f -name '*.dtb' -printf '%f\n' | sort || true
+            find "$dist_dir" -maxdepth 1 -type f -name '*.dtb' \
+              -printf '%f\n' | sort || true
             exit 1
           fi
-          cat "$DTB_LAHAINA" "$DTB_V2" "$DTB_V21" > ak3/dtb
+
+          # Keep the order used by the boot-tested OnePlus 9 Pro package.
+          cat "$dtb_lahaina" "$dtb_v21" "$dtb_v2" > ak3/dtb
           cp ak3/dtb artifacts/dist/dtb
 
-          DTBO_PATH="$(find_output dtbo.img)"
-          if [[ -z "$DTBO_PATH" || ! -f "$DTBO_PATH" ]]; then
+          dtbo_path="$(find_output dtbo.img)"
+          if [[ -z "$dtbo_path" || ! -f "$dtbo_path" ]]; then
             echo "::error::Built dtbo.img was not found"
             exit 1
           fi
-          cp "$DTBO_PATH" ak3/dtbo.img
-          cp "$DTBO_PATH" artifacts/dist/dtbo.img
+          cp "$dtbo_path" ak3/dtbo.img
+          cp "$dtbo_path" artifacts/dist/dtbo.img
 
-          echo "Kernel image: $IMAGE_PATH"
-          echo "Combined DTB size: $(stat -c '%s' ak3/dtb) bytes"
-          echo "DTBO image: $DTBO_PATH ($(stat -c '%s' ak3/dtbo.img) bytes)"
-
+          package_name="AnyKernel3-OnePlus9Pro-A17-BPF-${BUILD_PROFILE}-${BUILD_TIME}.zip"
           (
             cd ak3
-            zip -r9 "../artifacts/AnyKernel3-OnePlus9Pro-LXC-Docker-${BUILD_TIME}.zip" . \
+            zip -r9 "../artifacts/$package_name" . \
               -x '.git/*' '.github/*' 'README.md'
           )
-          ls -lh artifacts/*.zip
+
+          echo "PACKAGE_NAME=$package_name" >> "$GITHUB_ENV"
+          echo "Kernel image: $image_path"
+          echo "Combined DTB size: $(stat -c '%s' ak3/dtb) bytes"
+          echo "DTBO image: $dtbo_path ($(stat -c '%s' ak3/dtbo.img) bytes)"
+          sha256sum "$image_path" ak3/dtb ak3/dtbo.img "artifacts/$package_name"
 
       - name: Upload kernel dist
         uses: actions/upload-artifact@v4
         with:
-          name: OnePlus9Pro-LXC-Docker-dist-${{ env.BUILD_TIME }}
+          name: OnePlus9Pro-A17-BPF-${{ env.BUILD_PROFILE }}-dist-${{ env.BUILD_TIME }}
           path: kernel_workspace/artifacts/dist
           if-no-files-found: error
 
       - name: Upload AnyKernel3
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3-OnePlus9Pro-LXC-Docker-${{ env.BUILD_TIME }}
-          path: kernel_workspace/artifacts/AnyKernel3-OnePlus9Pro-LXC-Docker-${{ env.BUILD_TIME }}.zip
+          name: OnePlus9Pro-A17-BPF-${{ env.BUILD_PROFILE }}-${{ env.BUILD_TIME }}
+          path: kernel_workspace/artifacts/${{ env.PACKAGE_NAME }}
           if-no-files-found: error

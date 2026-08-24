@@ -1,69 +1,105 @@
-# OnePlus 9 Pro LXC + Docker Kernel Action
+# OnePlus 9 Pro Android 17 BPF Kernel Action
 
-This Action syncs and builds the supplied OnePlus 9 Pro manifest as-is, removes the old KernelSU installation logic from the Action itself, and keeps the LXC/Docker configuration and runtime patches.
+This Action builds the OnePlus 9 Pro Linux 5.4.254 kernel from the Android kernel manifest and build framework. Two selectable profiles are provided:
 
-## Source manifest
+- `plain`: Android 17 BPF 5.15 compatibility subset plus runtime hardening only
+- `containers`: the same fixed kernel with LXC, rootful Docker, and arm64 KVM support
 
-- Repository: `tqmane/android_kernel_manifest`
-- Branch: `oneplus/sm8350v_15.0.0_oneplus9pro`
+## Sources
 
-The workflow uses `repo init` / `repo sync` and the Android kernel build framework instead of cloning a single kernel repository and invoking `make` directly.
+- Manifest: `tqmane/android_kernel_manifest`
+- Manifest branch: `ci/a17-bpf-runtime-hardening`
+- Plain kernel: `fix/a17-bpf-task-storage-hardening`
+- Container kernel: `oneplus/sm8350v_17.0.0_oneplus9pro_sukisu_lxc_docker_kvm_v2`
+
+Both profiles use:
 
 ```bash
-BUILD_CONFIG=kernel/msm-5.4/build.config.lemonade \
-VARIANT=qgki \
-LTO=thin \
-BUILD_KERNEL=1 \
-build/build.sh
+VARIANT=qgki
+LTO=thin
+BUILD_KERNEL=1
 ```
 
-> The manifest README currently refers to `build.config.msm.lemonade`, but the actual OnePlus 9/9 Pro kernel tree contains `build.config.lemonade`.
+The plain build uses:
 
-## KernelSU / SukiSU behavior
+```bash
+BUILD_CONFIG=kernel/msm-5.4/build.config.lemonade build/build.sh
+```
 
-This Action no longer clones KernelSU, runs a KernelSU `setup.sh`, or injects KSU-specific configuration.
+The container build uses:
 
-The supplied manifest itself currently references a private kernel branch and a KernelSU/SukiSU submodule. Therefore, **KernelSU/SukiSU that already belongs to the manifest is still synced exactly as specified by that manifest**. Only the Action-level duplicate installation/override logic has been removed.
+```bash
+BUILD_CONFIG=kernel/msm-5.4/build.config.lemonade.container build/build.sh
+```
+
+## Plain profile
+
+The boot-tested Android 17 BPF configuration is kept intact. The Action does not add Docker, LXC, or KVM configuration and does not modify tracked kernel sources.
+
+The resulting configuration is checked for the required BPF/BTF options, disabled function tracing, and the absence of PID namespaces and KVM.
+
+## Container profile
+
+The dedicated kernel branch applies `lahaina_CONTAINER.config` after the normal GKI, QGKI, and vendor fragments. It adds:
+
+- PID, IPC, NET, and UTS namespaces, SysV IPC, and POSIX message queues;
+- device, pids, freezer, memory, and CPU-accounting cgroups;
+- seccomp filters, file handles, OverlayFS, tmpfs, and devtmpfs;
+- veth, bridge netfilter, NAT/iptables, macvlan, ipvlan, vxlan, and tun;
+- arm64 KVM, vhost, and vhost-net.
+
+The OPlus WALT scheduler model is retained, so `FAIR_GROUP_SCHED` and `RT_GROUP_SCHED` remain disabled. `USER_NS` also remains disabled.
+
+### GKI 1.0 KABI adaptation and stock-module compatibility
+
+Enabling `SYSVIPC` and `POSIX_MQUEUE` directly can move established fields in `task_struct` and `user_struct`, potentially breaking the KMI or symbol CRCs expected by stock vendor modules. The container branch therefore runs `scripts/gki/apply_container_kabi.py` and relocates the new state into unused Android KABI slots:
+
+- `struct sysv_sem` → `task_struct` slot 3;
+- `struct sysv_shm` → `task_struct` slots 4 and 5;
+- `mq_bytes` → `user_struct` slot 1.
+
+The Action records the adaptation in a deterministic local commit before building, preventing a `-dirty` suffix in the kernel release. Because the AnyKernel3 package replaces the Image but not stock vendor modules, the container branch also pins `.scmversion` to the plain hardening head suffix. CI accepts this compatibility release only when every matching plain/container `.ko` has identical vermagic and modversion CRC requirements. The effective build commit SHA and the KMI report are included in the artifacts.
+
+The unrelated Reno10 `module.c`, OverlayFS implementation, wholesale `user.h` replacement, and external runtime patches used by the referenced 9RT workflow are deliberately not copied. Only the dedicated SM8350 config and a minimal, reviewable KABI adaptation are used.
+
+## KernelSU / SukiSU
+
+The Action does not clone KernelSU, run a setup script, or inject KSU configuration.
+
+The private kernel tracked by the manifest already contains a SukiSU submodule. It is synced to the exact gitlink pinned by the superproject, with no duplicate installation or override by the Action.
 
 ## Private repository authentication
 
-The manifest references private repositories and a private submodule. Add the following Actions secret to this repository:
+Add a fine-grained PAT with read access to the private kernel and SukiSU repositories using either secret name:
 
-- Secret name: `PRIVATE_REPO_TOKEN`
-- Value: a fine-grained PAT with read access to every private repository referenced by the manifest
+- preferred: `PRIVATE_REPO_TOKEN`
+- legacy compatibility: `GH_PAT`
 
-At minimum, the current manifest requires read access to:
+At minimum, access is required for:
 
 - `tqmane/android_kernel_oppo_sm8350-private`
 - `tqmane/SukiSU-Ultra-private`
 
-The PAT is not embedded in the workflow or manifest. It is provided to Git through the credential helper for `repo sync`.
+## Running a build
 
-## LXC / Docker
+Open `Build OnePlus 9 Pro Android 17 BPF kernel` in GitHub Actions and select either `plain` or `containers` in `Run workflow`.
 
-The default `config.env` keeps LXC and Docker enabled:
+Pull requests automatically build both profiles, validate the effective configurations, and compare stock-module compatibility.
 
-```ini
-LXC_DOCKER=true
-LXC_PATCH=true
-ANDROID_PARANOID_NETWORK_OFF=true
+## Artifacts
+
+Each profile uploads:
+
+- the Android kernel build framework `dist` directory;
+- the effective kernel `.config`;
+- the exact effective kernel commit SHA;
+- a flashable AnyKernel3 ZIP from the manifest-provided `ak3` tree;
+- a plain/container module vermagic and modversion CRC comparison report.
+
+DTBs are concatenated in the order used by the boot-tested OnePlus 9 Pro package:
+
+```text
+lahaina.dtb -> lahaina-v2.1.dtb -> lahaina-v2.dtb
 ```
 
-The LXC/Docker configuration is applied to the Lahaina QGKI fragment before `build/build.sh` generates the final defconfig. The cgroup runtime patch and `xt_qtaguid` patch are also retained.
-
-KVM remains optional:
-
-```ini
-ENABLE_KVM=false
-```
-
-## Running the build
-
-Open GitHub Actions, select `Build OnePlus 9 Pro LXC/Docker kernel`, and choose `Run workflow`.
-
-The workflow uploads:
-
-- the Android kernel build framework `dist` output;
-- a OnePlus 9 Pro AnyKernel3 ZIP built from the `ak3` project in the manifest.
-
-The main build settings are in the repository root `config.env`.
+References and build configs are managed in `config.env`. The container profile is compile-tested and checked against the stock module KMI by CI, but device runtime validation should still cover cold boot and Docker, LXC, and KVM separately with a known rollback path available. KVM runtime also depends on the device firmware and hypervisor exposing usable EL2 support.
