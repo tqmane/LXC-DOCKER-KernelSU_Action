@@ -1,55 +1,52 @@
 # OnePlus 9 Pro Android 17 BPF Kernel Action
 
-OnePlus 9 Pro向けLinux 5.4.254カーネルを、Android kernel build frameworkとmanifestからビルドするActionです。実行時に次の2プロファイルを選べます。
+OnePlus 9 Pro向けLinux 5.4.254カーネルを、Android kernel build frameworkとmanifestからビルドするActionです。実行時に2つのprofileを選べます。
 
-- `plain`: Android 17向けBPF 5.15互換サブセット＋runtime hardeningのみ
-- `containers`: 同じ修正版を基準にLXC、rootful Docker、arm64 KVMを追加
+- `plain`: 通常のAndroid 17 BPF／SukiSUカーネル
+- `containers`: 同じsourceへLXC、rootful Docker、arm64 KVM用configを追加
 
 ## ビルド元
 
 - manifest: `tqmane/android_kernel_manifest`
 - manifest branch: `ci/a17-bpf-runtime-hardening`
-- plain kernel: `fix/a17-bpf-task-storage-hardening`
-- container kernel: `oneplus/sm8350v_17.0.0_oneplus9pro_sukisu_lxc_docker_kvm_v2`
+- kernel: `oneplus/sm8350v_17.0.0_oneplus9pro_sukisu`
 
-共通ビルド条件は次のとおりです。
+plainとcontainersでkernel branchを分けません。違うのは`BUILD_CONFIG`だけです。
 
-```bash
+```text
+plain      -> kernel/msm-5.4/build.config.lemonade
+containers -> kernel/msm-5.4/build.config.lemonade.container
+```
+
+共通条件:
+
+```text
 VARIANT=qgki
 LTO=thin
 BUILD_KERNEL=1
 ```
 
-`plain`は次を使用します。
+kernel PRを検証するときだけ、手動入力またはreusable workflowの`kernel_ref`で一時branch／commitを指定できます。未指定時は常に上記の本流を使用します。
 
-```bash
-BUILD_CONFIG=kernel/msm-5.4/build.config.lemonade build/build.sh
-```
+## plain profile
 
-`containers`は次を使用します。
+端末用の通常build configをそのまま使用します。plainだからといって`PID_NS`や`KVM`が必ず無効とは仮定しません。以前のCIはこの誤った仮定により、正常にコンパイル済みのplain buildを失敗扱いしていました。
 
-```bash
-BUILD_CONFIG=kernel/msm-5.4/build.config.lemonade.container build/build.sh
-```
-
-## plainプロファイル
-
-起動確認済みのAndroid 17 BPF構成を保ちます。ActionはDocker、LXC、KVM向けconfigを追加せず、追跡対象のカーネルソースも変更しません。
-
-ビルド後、少なくとも次を検証します。
+両profileで次を確認します。
 
 - `CONFIG_BPF_SYSCALL=y`
 - `CONFIG_BPF_JIT=y`
 - `CONFIG_BPF_JIT_ALWAYS_ON=y`
 - `CONFIG_BPF_LSM=y`
 - `CONFIG_DEBUG_INFO_BTF=y`
-- `CONFIG_FUNCTION_TRACER=n`
-- `CONFIG_PID_NS=n`
-- `CONFIG_KVM=n`
+- `CONFIG_LSM`に`bpf`を含む
+- `CONFIG_FUNCTION_TRACER`は無効
+- `vmlinux`に`.BTF`と`.BTF_ids`が存在
+- `.BTF_ids`のaddressとELF alignmentが4-byte以上
 
-## containersプロファイル
+## containers profile
 
-専用ブランチの`lahaina_CONTAINER.config`を通常のQGKI/vendor fragmentの最後に適用します。主な追加項目は次のとおりです。
+`lahaina_CONTAINER.config`を通常のQGKI/vendor fragmentの最後に適用します。主な追加項目:
 
 - PID／IPC／NET／UTS namespace、SysV IPC、POSIX message queue
 - device、pids、freezer、memory、CPU accountingなどのcgroup
@@ -57,63 +54,59 @@ BUILD_CONFIG=kernel/msm-5.4/build.config.lemonade.container build/build.sh
 - veth、bridge netfilter、NAT／iptables、macvlan、ipvlan、vxlan、tun
 - arm64 KVM、vhost、vhost-net
 
-OPlusのWALT schedulerを維持するため、`FAIR_GROUP_SCHED`と`RT_GROUP_SCHED`は有効化しません。`USER_NS`も無効のままです。
+OPlusのWALT schedulerを維持するため、`FAIR_GROUP_SCHED`と`RT_GROUP_SCHED`は無効のままです。`USER_NS`も無効です。
 
-### GKI 1.0 KABI適応とstock module互換
+### GKI 1.0 KABI適応
 
-`SYSVIPC`と`POSIX_MQUEUE`を単純に有効化すると、`task_struct`と`user_struct`の既存field位置が変わり、stock vendor moduleのKMI／CRCを壊す可能性があります。そのため、container branch内の`scripts/gki/apply_container_kabi.py`を実行し、追加stateを未使用のAndroid KABI slotへ移します。
+`SYSVIPC`と`POSIX_MQUEUE`で`task_struct`／`user_struct`の既存fieldを動かさないよう、source内の`scripts/gki/apply_container_kabi.py`を実行します。
 
 - `struct sysv_sem` → `task_struct` slot 3
 - `struct sysv_shm` → `task_struct` slots 4／5
 - `mq_bytes` → `user_struct` slot 1
 
-Actionは適応後の差分を固定日時のlocal commitにしてからビルドするため、kernel releaseへ`-dirty`を付けません。container branchの`.scmversion`はplain hardening headのSCM suffixへ固定し、Imageだけを入れ替えるAnyKernel3でもstock moduleと同じvermagicを維持します。この固定は、CIでplain／containerの同名`.ko`についてvermagicと全modversion CRCが一致した場合だけ合格とします。成果物には実際にビルドしたcommit SHAとKMI比較レポートも保存します。
+差分は固定日時のlocal commitにしてからビルドするため、kernel releaseへ`-dirty`を付けません。
 
-9RT参考repoにあった別機種Reno10用`module.c`、OverlayFS実装、`user.h`の丸ごと置換、外部runtime patchは使用していません。SM8350ツリー内の専用configと、レビュー可能な最小KABI適応だけを使用します。
+9RT参考repoにある別機種Reno10用`module.c`、OverlayFS実装、`user.h`丸ごと置換、外部runtime patchは使用しません。
 
-## KernelSU／SukiSU
+## SukiSU
 
-このAction自身はKernelSUをcloneせず、`setup.sh`を実行せず、KSU configも注入しません。
-
-manifestが追跡するprivate kernelには既にSukiSU submoduleが含まれるため、それをsuperprojectの固定gitlinkへ同期します。Action側から二重導入や上書きは行いません。
+Action側ではKernelSUをcloneせず、setup scriptもKSU config注入も行いません。kernel sourceに含まれるSukiSU submoduleをsuperproject指定のcommitへ同期します。
 
 ## Private repository認証
 
-次のいずれかのActions secretへ、private kernelとSukiSU submoduleをreadできるfine-grained PATを登録してください。
+private kernelとSukiSUをreadできるfine-grained PATをActions secretへ登録してください。
 
 - 推奨: `PRIVATE_REPO_TOKEN`
-- 互換: `GH_PAT`
-
-少なくとも次へのread権限が必要です。
-
-- `tqmane/android_kernel_oppo_sm8350-private`
-- `tqmane/SukiSU-Ultra-private`
+- 互換: `GH_PAT`または`PAT`
 
 ## 実行方法
 
-GitHub Actionsで`Build OnePlus 9 Pro Android 17 BPF kernel`を開き、`Run workflow`から次のどちらかを選びます。
+Actionsの`Build OnePlus 9 Pro Android 17 BPF kernel`から、次を選択します。
 
 ```text
 plain
 containers
 ```
 
-Pull Requestでは両プロファイルが自動でビルドされ、最終`.config`とstock module互換性も検査されます。
+通常は`kernel_ref`を空欄のままにします。
+
+Pull Requestでは両profileをfull buildし、最終config、BTF section、成果物生成を検査します。同一pathの`.ko`が両distにある場合はvermagicとmodversion CRCも比較します。distに比較可能なmoduleがない場合は、KMI検査を「未実施」と明記してwarningにし、カーネルbuild自体を失敗扱いにはしません。
 
 ## 成果物
 
-各プロファイルについて次をアップロードします。
+- Android kernel build frameworkの`dist`
+- `effective.config`
+- build log
+- `readelf` section一覧
+- source／effective commit SHAとbuild metadata
+- AnyKernel3 ZIP
+- SHA-256一覧
+- module KMI比較レポート
 
-- Android kernel build frameworkの`dist`一式
-- 実際に使用した`effective.config`
-- 実際にビルドしたkernel commit SHA
-- manifestのAnyKernel3を使用したflashable ZIP
-- plain／container間のmodule vermagic・modversion CRC比較レポート
-
-DTBは、実機起動確認済みpackageに合わせて次の順で連結します。
+DTBは既存packageと同じ順で連結します。
 
 ```text
-lahaina.dtb -> lahaina-v2.1.dtb -> lahaina-v2.dtb
+lahaina -> v2.1 -> v2
 ```
 
-主要なrefとbuild configは`config.env`で管理しています。containerプロファイルはCIでbuild可能性とstock module互換性を検証しますが、実機導入前には必ずrollback手段を確保し、cold boot、Docker/LXC/KVMのruntimeを個別に確認してください。KVMの実行には端末firmware／hypervisorがEL2を利用可能にしていることも必要です。
+container buildがCIで成功しても、実機ではcold boot、Docker、LXC、network、stock module、SukiSU、KVMを個別に確認してください。KVM runtimeにはfirmware／hypervisorがEL2を利用可能にしている必要があります。
