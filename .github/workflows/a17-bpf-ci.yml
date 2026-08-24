@@ -24,10 +24,6 @@ jobs:
     uses: ./.github/workflows/yun-kernel.yml
     with:
       build_profile: plain
-      # Validate the BTF alignment fix and the container-profile ABI cleanup
-      # before their kernel PRs are merged. Manual/default builds still use the
-      # production branch from config.env.
-      kernel_ref: fix/a17-container-kmi
     secrets:
       PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_PAT || secrets.PAT }}
 
@@ -36,7 +32,6 @@ jobs:
     uses: ./.github/workflows/yun-kernel.yml
     with:
       build_profile: containers
-      kernel_ref: fix/a17-container-kmi
     secrets:
       PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_PAT || secrets.PAT }}
 
