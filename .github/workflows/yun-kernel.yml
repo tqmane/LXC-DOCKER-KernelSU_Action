@@ -66,16 +66,13 @@ jobs:
 
           profile="${REQUESTED_PROFILE:-plain}"
           kernel_ref="${REQUESTED_KERNEL_REF:-}"
-          if [[ -z "$kernel_ref" ]]; then
-            kernel_ref="$KERNEL_REF"
-          fi
+          [[ -n "$kernel_ref" ]] || kernel_ref="$KERNEL_REF"
 
           for key in \
             MANIFEST_REPO MANIFEST_BRANCH KERNEL_REF \
             PLAIN_BUILD_CONFIG CONTAINER_BUILD_CONFIG VARIANT LTO BUILD_KERNEL \
             KERNEL_IMAGE_NAME ENABLE_CCACHE; do
-            value="${!key:-}"
-            if [[ -z "$value" ]]; then
+            if [[ -z "${!key:-}" ]]; then
               echo "::error::Missing $key in config.env"
               exit 1
             fi
@@ -88,10 +85,10 @@ jobs:
 
           case "$profile" in
             plain)
-              active_build_config="$PLAIN_BUILD_CONFIG"
+              build_config="$PLAIN_BUILD_CONFIG"
               ;;
             containers)
-              active_build_config="$CONTAINER_BUILD_CONFIG"
+              build_config="$CONTAINER_BUILD_CONFIG"
               ;;
             *)
               echo "::error::Unsupported build profile: $profile"
@@ -103,7 +100,7 @@ jobs:
             echo "MANIFEST_REPO=$MANIFEST_REPO"
             echo "MANIFEST_BRANCH=$MANIFEST_BRANCH"
             echo "KERNEL_REF=$kernel_ref"
-            echo "ACTIVE_BUILD_CONFIG=$active_build_config"
+            echo "ACTIVE_BUILD_CONFIG=$build_config"
             echo "VARIANT=$VARIANT"
             echo "LTO=$LTO"
             echo "BUILD_KERNEL=$BUILD_KERNEL"
@@ -113,9 +110,9 @@ jobs:
             echo "BUILD_TIME=$(TZ=Asia/Tokyo date '+%Y%m%d-%H%M')"
           } >> "$GITHUB_ENV"
 
-          echo "Selected profile: $profile"
+          echo "Profile: $profile"
           echo "Kernel ref: $kernel_ref"
-          echo "Build config: $active_build_config"
+          echo "Build config: $build_config"
 
       - name: Free build space
         uses: easimon/maximize-build-space@master
@@ -134,8 +131,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bc binutils binutils-aarch64-linux-gnu bison build-essential ccache curl \
-            device-tree-compiler flex git libelf-dev liblz4-tool libncurses-dev \
-            libssl-dev lz4 python3 rsync unzip zip zstd
+            device-tree-compiler flex git kmod libelf-dev liblz4-tool \
+            libncurses-dev libssl-dev lz4 python3 rsync tar unzip zip zstd
 
           mkdir -p "$HOME/bin"
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo \
@@ -150,7 +147,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${PRIVATE_REPO_TOKEN:-}" ]]; then
-            echo "::error::PRIVATE_REPO_TOKEN (or legacy GH_PAT/PAT) is required to read the private kernel and SukiSU repositories."
+            echo "::error::PRIVATE_REPO_TOKEN (or GH_PAT/PAT) is required for the private kernel and SukiSU repositories."
             exit 1
           fi
 
@@ -163,13 +160,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/kernel_workspace"
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          workspace="$GITHUB_WORKSPACE/kernel_workspace"
+          mkdir -p "$workspace"
+          cd "$workspace"
 
           repo init -u "$MANIFEST_REPO" -b "$MANIFEST_BRANCH"
           if ! repo sync --force-sync --no-clone-bundle --current-branch \
               --no-tags -j"$(nproc --all)"; then
-            echo "Parallel repo sync failed; retrying serially for a precise error"
+            echo "Parallel repo sync failed; retrying with -j1 --fail-fast"
             repo sync --force-sync --no-clone-bundle --current-branch \
               --no-tags -j1 --fail-fast
           fi
@@ -178,15 +176,13 @@ jobs:
           test -d modules_devicetree
           test -d ak3
 
-          mapfile -t kernel_remotes < <(git -C kernel/msm-5.4 remote)
-          kernel_remote="${kernel_remotes[0]:-}"
+          mapfile -t remotes < <(git -C kernel/msm-5.4 remote)
+          kernel_remote="${remotes[0]:-}"
           if [[ -z "$kernel_remote" ]]; then
             echo "::error::The manifest kernel checkout has no Git remote"
             exit 1
           fi
 
-          # The manifest checks out the current production branch. An explicit
-          # ref override is used only to validate an in-flight kernel fix PR.
           git -C kernel/msm-5.4 fetch "$kernel_remote" "$KERNEL_REF" --depth=1
           git -C kernel/msm-5.4 checkout --detach FETCH_HEAD
           source_sha="$(git -C kernel/msm-5.4 rev-parse HEAD)"
@@ -240,8 +236,8 @@ jobs:
 
           echo "Kernel source ref: $KERNEL_REF"
           echo "Kernel source commit: $source_sha"
-          echo "Kernel effective build commit: $effective_sha"
-          echo "Kernel remote used: $kernel_remote"
+          echo "Kernel effective commit: $effective_sha"
+          echo "Kernel remote: $kernel_remote"
 
           if [[ ! -f "$ACTIVE_BUILD_CONFIG" ]]; then
             echo "::error::BUILD_CONFIG does not exist: $ACTIVE_BUILD_CONFIG"
@@ -268,7 +264,7 @@ jobs:
           build/build.sh 2>&1 | tee \
             "$GITHUB_WORKSPACE/kernel-build-${BUILD_PROFILE}.log"
 
-      - name: Validate effective kernel configuration and BTF sections
+      - name: Validate effective config and BTF sections
         shell: bash
         run: |
           set -euo pipefail
@@ -310,24 +306,18 @@ jobs:
             exit 1
           fi
 
-          case "$BUILD_PROFILE" in
-            plain)
-              # Plain means the normal device build config. Do not assume that
-              # device defaults such as PID_NS or KVM are disabled.
-              ;;
-            containers)
-              for symbol in \
-                CONFIG_IPC_NS CONFIG_PID_NS CONFIG_NET_NS CONFIG_SYSVIPC \
-                CONFIG_POSIX_MQUEUE CONFIG_CGROUP_DEVICE CONFIG_CGROUP_PIDS \
-                CONFIG_SECCOMP_FILTER CONFIG_FHANDLE CONFIG_OVERLAY_FS \
-                CONFIG_BRIDGE_NETFILTER CONFIG_VETH CONFIG_KVM CONFIG_VHOST_NET; do
-                require_y "$symbol"
-              done
-              require_disabled CONFIG_USER_NS
-              require_disabled CONFIG_FAIR_GROUP_SCHED
-              require_disabled CONFIG_RT_GROUP_SCHED
-              ;;
-          esac
+          if [[ "$BUILD_PROFILE" == "containers" ]]; then
+            for symbol in \
+              CONFIG_IPC_NS CONFIG_PID_NS CONFIG_NET_NS CONFIG_USER_NS \
+              CONFIG_SYSVIPC CONFIG_POSIX_MQUEUE CONFIG_CGROUP_DEVICE \
+              CONFIG_CGROUP_PIDS CONFIG_SECCOMP_FILTER CONFIG_FHANDLE \
+              CONFIG_OVERLAY_FS CONFIG_BRIDGE_NETFILTER CONFIG_VETH \
+              CONFIG_KVM CONFIG_VHOST_NET; do
+              require_y "$symbol"
+            done
+            require_disabled CONFIG_FAIR_GROUP_SCHED
+            require_disabled CONFIG_RT_GROUP_SCHED
+          fi
 
           vmlinux_path="$(find out -type f -path '*/dist/vmlinux' \
             -print -quit 2>/dev/null || true)"
@@ -351,7 +341,6 @@ jobs:
           output = subprocess.check_output(
               ["readelf", "-SW", path], text=True, errors="replace"
           )
-
           if not re.search(r"\]\s+\.BTF\s+", output):
               raise SystemExit("vmlinux does not contain a .BTF section")
 
@@ -366,7 +355,6 @@ jobs:
           rest = line.split(".BTF_ids", 1)[1].split()
           if len(rest) < 3:
               raise SystemExit(f"could not parse .BTF_ids section: {line}")
-
           address = int(rest[1], 16)
           alignment = int(rest[-1], 0)
           if address % 4:
@@ -377,17 +365,14 @@ jobs:
               raise SystemExit(
                   f".BTF_ids ELF alignment is {alignment}, expected at least 4"
               )
-
-          print(
-              f"Validated .BTF_ids: address=0x{address:x}, align={alignment}"
-          )
+          print(f"Validated .BTF_ids: address=0x{address:x}, align={alignment}")
           PY
 
           cp "$config_path" "$GITHUB_WORKSPACE/effective-${BUILD_PROFILE}.config"
           echo "Effective config: $config_path"
           echo "vmlinux: $vmlinux_path"
 
-      - name: Collect kernel and AnyKernel3 artifacts
+      - name: Collect profile artifacts
         shell: bash
         run: |
           set -euo pipefail
@@ -416,8 +401,6 @@ jobs:
             echo "build_profile=$BUILD_PROFILE"
             echo "build_config=$ACTIVE_BUILD_CONFIG"
           } > artifacts/dist/build-metadata.txt
-
-          cp "$image_path" "ak3/$KERNEL_IMAGE_NAME"
 
           find_dist_file() {
             local candidate
@@ -449,29 +432,60 @@ jobs:
               -printf '%P\n' | sort || true
             exit 1
           fi
-
-          # Preserve the order used by the existing boot-tested package.
-          cat "$dtb_lahaina" "$dtb_v21" "$dtb_v2" > ak3/dtb
-          cp ak3/dtb artifacts/dist/dtb
+          cat "$dtb_lahaina" "$dtb_v21" "$dtb_v2" > artifacts/dist/dtb
 
           dtbo_path="$(find_dist_file dtbo.img || true)"
           if [[ -z "$dtbo_path" || ! -f "$dtbo_path" ]]; then
             echo "::error::Built dtbo.img was not found"
             exit 1
           fi
-          cp "$dtbo_path" ak3/dtbo.img
           cp "$dtbo_path" artifacts/dist/dtbo.img
 
-          package_name="AnyKernel3-OnePlus9Pro-A17-BPF-${BUILD_PROFILE}-${BUILD_TIME}.zip"
-          (
-            cd ak3
-            zip -r9 "../artifacts/$package_name" . \
-              -x '.git/*' '.github/*' 'README.md'
-          )
+          if [[ "$BUILD_PROFILE" == "plain" ]]; then
+            cp "$image_path" "ak3/$KERNEL_IMAGE_NAME"
+            cp artifacts/dist/dtb ak3/dtb
+            cp artifacts/dist/dtbo.img ak3/dtbo.img
 
-          echo "PACKAGE_NAME=$package_name" >> "$GITHUB_ENV"
-          sha256sum "$image_path" ak3/dtb ak3/dtbo.img \
-            "artifacts/$package_name" | tee artifacts/SHA256SUMS
+            package_name="AnyKernel3-OnePlus9Pro-A17-BPF-plain-${BUILD_TIME}.zip"
+            (
+              cd ak3
+              zip -r9 "../artifacts/$package_name" . \
+                -x '.git/*' '.github/*' 'README.md'
+            )
+            echo "PACKAGE_NAME=$package_name" >> "$GITHUB_ENV"
+            sha256sum "$image_path" artifacts/dist/dtb artifacts/dist/dtbo.img \
+              "artifacts/$package_name" | tee artifacts/SHA256SUMS
+          else
+            # Container-specific Kconfig changes exported-symbol CRCs. A
+            # kernel-only ZIP would leave stock modules mismatched, so publish
+            # the Image together with every matching rebuilt module instead.
+            bundle_dir=artifacts/container-bundle
+            mkdir -p "$bundle_dir/modules"
+            cp "$image_path" "$bundle_dir/$KERNEL_IMAGE_NAME"
+            cp artifacts/dist/dtb artifacts/dist/dtbo.img \
+              artifacts/dist/effective.config artifacts/dist/Module.symvers \
+              artifacts/dist/build-metadata.txt "$bundle_dir/"
+            find "$dist_dir" -maxdepth 1 -type f -name '*.ko' \
+              -exec cp -t "$bundle_dir/modules" {} +
+
+            module_count="$(find "$bundle_dir/modules" -type f -name '*.ko' | wc -l)"
+            if [[ "$module_count" -eq 0 ]]; then
+              echo "::error::Container bundle contains no rebuilt modules"
+              exit 1
+            fi
+            {
+              echo "This profile is not safe as a kernel-only flash."
+              echo "Deploy the matching rebuilt module set with the Image."
+              echo "module_count=$module_count"
+            } > "$bundle_dir/DEPLOYMENT-NOTICE.txt"
+
+            bundle_name="OnePlus9Pro-A17-BPF-containers-kernel-modules-${BUILD_TIME}.tar.zst"
+            tar --zstd -cf "artifacts/$bundle_name" -C "$bundle_dir" .
+            echo "CONTAINER_BUNDLE_NAME=$bundle_name" >> "$GITHUB_ENV"
+            sha256sum "$image_path" artifacts/dist/dtb artifacts/dist/dtbo.img \
+              "artifacts/$bundle_name" | tee artifacts/SHA256SUMS
+          fi
+
           cp artifacts/SHA256SUMS artifacts/dist/SHA256SUMS
 
       - name: Upload kernel dist
@@ -481,12 +495,23 @@ jobs:
           path: kernel_workspace/artifacts/dist
           if-no-files-found: error
 
-      - name: Upload AnyKernel3
+      - name: Upload plain AnyKernel3
+        if: env.BUILD_PROFILE == 'plain'
         uses: actions/upload-artifact@v4
         with:
-          name: OnePlus9Pro-A17-BPF-${{ env.BUILD_PROFILE }}-${{ env.BUILD_TIME }}
+          name: OnePlus9Pro-A17-BPF-plain-${{ env.BUILD_TIME }}
           path: |
             kernel_workspace/artifacts/${{ env.PACKAGE_NAME }}
+            kernel_workspace/artifacts/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Upload container kernel and rebuilt modules
+        if: env.BUILD_PROFILE == 'containers'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnePlus9Pro-A17-BPF-containers-kernel-modules-${{ env.BUILD_TIME }}
+          path: |
+            kernel_workspace/artifacts/${{ env.CONTAINER_BUNDLE_NAME }}
             kernel_workspace/artifacts/SHA256SUMS
           if-no-files-found: error
 
