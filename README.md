@@ -48,13 +48,13 @@ kernel PRを検証するときだけ、手動入力またはreusable workflowの
 
 `lahaina_CONTAINER.config`を通常のQGKI/vendor fragmentの最後に適用します。主な追加項目:
 
-- PID／IPC／NET／UTS namespace、SysV IPC、POSIX message queue
+- PID／IPC／NET／UTS／USER namespace、SysV IPC、POSIX message queue
 - device、pids、freezer、memory、CPU accountingなどのcgroup
 - seccomp filter、file handles、OverlayFS、tmpfs、devtmpfs
 - veth、bridge netfilter、NAT／iptables、macvlan、ipvlan、vxlan、tun
 - arm64 KVM、vhost、vhost-net
 
-OPlusのWALT schedulerを維持するため、`FAIR_GROUP_SCHED`と`RT_GROUP_SCHED`は無効のままです。`USER_NS`も無効です。
+OPlusのWALT schedulerを維持するため、`FAIR_GROUP_SCHED`と`RT_GROUP_SCHED`は無効のままです。production/plainで有効な`USER_NS`は維持します。
 
 ### GKI 1.0 KABI適応
 
@@ -67,6 +67,22 @@ OPlusのWALT schedulerを維持するため、`FAIR_GROUP_SCHED`と`RT_GROUP_SCH
 差分は固定日時のlocal commitにしてからビルドするため、kernel releaseへ`-dirty`を付けません。
 
 9RT参考repoにある別機種Reno10用`module.c`、OverlayFS実装、`user.h`丸ごと置換、外部runtime patchは使用しません。
+
+### container版のmodule互換性
+
+container固有Kconfigでは、同じvermagicでもexported-symbolのmodversion CRCがplainと異なります。これはbuild失敗ではなく、**container kernelにはcontainer buildで再生成した`.ko`が必要**という意味です。
+
+そのため、container profileではkernelだけを差し替えるAnyKernel3 ZIPを作りません。代わりに以下をまとめたbundleを出力します。
+
+- `Image`
+- 結合済み`dtb`
+- `dtbo.img`
+- container configで再生成した全`.ko`
+- `Module.symvers`
+- `effective.config`
+- build metadata
+
+このbundleは自動flash ZIPではありません。stock moduleを残したまま`Image`だけ焼く用途には使用できません。
 
 ## SukiSU
 
@@ -90,18 +106,29 @@ containers
 
 通常は`kernel_ref`を空欄のままにします。
 
-Pull Requestでは両profileをfull buildし、最終config、BTF section、成果物生成を検査します。同一pathの`.ko`が両distにある場合はvermagicとmodversion CRCも比較します。distに比較可能なmoduleがない場合は、KMI検査を「未実施」と明記してwarningにし、カーネルbuild自体を失敗扱いにはしません。
+Pull Requestでは両profileをfull buildし、最終config、BTF section、成果物生成を検査します。module検査は次の2段階です。
+
+1. 各profileの`.ko`が、そのprofile自身の`Module.symvers`と一致することを必須検査
+2. plainとcontainersのCRC差分を互換性reportとして記録
+
+自己整合性に失敗した場合だけCIを失敗させます。profile間にCRC差分がある場合は、container用kernel-only packageを禁止したうえでwarningとreportを出します。
 
 ## 成果物
+
+共通:
 
 - Android kernel build frameworkの`dist`
 - `effective.config`
 - build log
 - `readelf` section一覧
 - source／effective commit SHAとbuild metadata
-- AnyKernel3 ZIP
 - SHA-256一覧
-- module KMI比較レポート
+- module ABI report
+
+profile別:
+
+- plain: flashable AnyKernel3 ZIP
+- containers: kernel＋matching rebuilt modulesの`.tar.zst` bundle
 
 DTBは既存packageと同じ順で連結します。
 
@@ -109,4 +136,4 @@ DTBは既存packageと同じ順で連結します。
 lahaina -> v2.1 -> v2
 ```
 
-container buildがCIで成功しても、実機ではcold boot、Docker、LXC、network、stock module、SukiSU、KVMを個別に確認してください。KVM runtimeにはfirmware／hypervisorがEL2を利用可能にしている必要があります。
+container buildがCIで成功しても、実機ではmatching moduleの配置方法を確立したうえで、cold boot、Docker、LXC、network、SukiSU、KVMを個別に確認してください。KVM runtimeにはfirmware／hypervisorがEL2を利用可能にしている必要があります。
